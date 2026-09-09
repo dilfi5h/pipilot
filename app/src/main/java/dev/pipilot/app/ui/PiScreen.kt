@@ -655,19 +655,24 @@ private fun SessionsSheet(ui: UiState, viewModel: PiViewModel, onDismiss: () -> 
             }
             LazyColumn(contentPadding = androidx.compose.foundation.layout.PaddingValues(bottom = 32.dp)) {
                 items(ui.sessions, key = { it.path }) { s ->
-                    TextButton(
-                        onClick = {
-                            viewModel.switchSession(s.path)
-                            onDismiss()
-                        },
-                        modifier = Modifier.combinedClickable(
-                            onClick = {
-                                viewModel.switchSession(s.path)
-                                onDismiss()
-                            },
-                            onLongClick = { pendingDelete = s },
-                        ),
-                    ) { Text(s.name, fontFamily = FontFamily.Monospace) }
+                    // 不能用 TextButton+combinedClickable 叠加:按钮内部自带 clickable,
+                    // 主分发内层先收到事件,长按松手被按钮当普通点击消费,onLongClick 永远不触发。
+                    // 普通 Text 只挂一个 combinedClickable,点按/长按才各自生效。
+                    Text(
+                        text = s.name,
+                        style = MaterialTheme.typography.bodyLarge,
+                        fontFamily = FontFamily.Monospace,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .combinedClickable(
+                                onClick = {
+                                    viewModel.switchSession(s.path)
+                                    onDismiss()
+                                },
+                                onLongClick = { pendingDelete = s },
+                            )
+                            .padding(horizontal = 8.dp, vertical = 14.dp),
+                    )
                 }
             }
         }
