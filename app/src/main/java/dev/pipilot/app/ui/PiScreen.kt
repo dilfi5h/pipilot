@@ -716,8 +716,20 @@ private fun SessionsSheet(ui: UiState, viewModel: PiViewModel, onDismiss: () -> 
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
             Spacer(Modifier.size(4.dp))
-            if (ui.sessions.isEmpty()) {
-                Text("没有找到 ~/.pi/agent/sessions 下的会话", color = MaterialTheme.colorScheme.onSurfaceVariant)
+            if (ui.sessionsLoading) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier.padding(vertical = 16.dp),
+                ) {
+                    CircularProgressIndicator(modifier = Modifier.size(20.dp), strokeWidth = 2.dp)
+                    Spacer(Modifier.size(12.dp))
+                    Text("正在列出会话…", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+            } else if (ui.sessions.isEmpty()) {
+                Text(
+                    "在 ${ui.sessionsDir ?: "~/.pi/agent/sessions"} 下没有找到会话",
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
             }
             LazyColumn(contentPadding = androidx.compose.foundation.layout.PaddingValues(bottom = 32.dp)) {
                 items(ui.sessions, key = { it.path }) { s ->

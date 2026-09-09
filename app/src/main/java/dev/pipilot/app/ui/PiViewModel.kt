@@ -70,6 +70,8 @@ data class UiState(
     val models: List<PiModel> = emptyList(),
     val thinkingLevels: List<String> = emptyList(),
     val sessions: List<SessionEntryInfo> = emptyList(),
+    val sessionsLoading: Boolean = false,
+    val sessionsDir: String? = null,
     val queueSteering: List<String> = emptyList(),
     val queueFollowUp: List<String> = emptyList(),
     val dialog: UiDialog? = null,
@@ -499,20 +501,41 @@ class PiViewModel(app: Application) : AndroidViewModel(app) {
 
     fun listSessions() {
         val s = settings.value
+        if (_ui.value.sessionsLoading) return
         viewModelScope.launch {
+            _ui.value = _ui.value.copy(sessionsLoading = true)
             try {
-                // session 文件可能在子目录(如 --root--/ 下):递归按 mtime 取最近 30 个;
+                // 当前激活会话所在目录:兜底覆盖 --session-dir 等自定义目录场景
+                val fallbackDir = _ui.value.state?.sessionFile
+                    ?.takeIf { it.isNotBlank() }
+                    ?.substringBeforeLast('/', "")
+                    ?.takeIf { it.isNotBlank() }
+                // 可移植列会话:不用 GNU find -printf(远端可能是 BusyBox/BSD find),
+                // 目录取 PI_CODING_AGENT_DIR/PI_CODING_AGENT_SESSION_DIR(与上游 getAgentDir/getSessionsDir 一致),
+                // mtime 用 stat 双写法(GNU -c %Y / BSD -f %m)兼容,排序后取最近 30 个;
                 // 每个文件抓最后一条 session_info 的 name 作为显示名(pi TUI 的命名就存在文件里)
-                val out = SshConnector.runQuick(
-                    s.toSshConfig(),
-                    "find ~/.pi/agent/sessions -name '*.jsonl' -printf '%T@ %p\\n' 2>/dev/null | sort -rn | head -30 | cut -d' ' -f2- | " +
+                val listFn =
+                    "lsSessions() { d=\"\$1\"; [ -d \"\$d\" ] || return 0; " +
+                        "find \"\$d\" -type f -name '*.jsonl' 2>/dev/null | head -100 | " +
                         "while IFS= read -r p; do " +
-                        "n=\\$(grep -h '\"type\":\"session_info\"' \"\\\$p\" 2>/dev/null | tail -1 | " +
+                        "mt=\$(stat -c %Y \"\$p\" 2>/dev/null || stat -f %m \"\$p\" 2>/dev/null || echo 0); " +
+                        "mt=\${mt%%[!0-9]*}; [ -z \"\$mt\" ] && mt=0; " +
+                        "printf '%s %s\\n' \"\$mt\" \"\$p\"; done | " +
+                        "sort -rn | head -30 | cut -d' ' -f2- | " +
+                        "while IFS= read -r p; do " +
+                        "n=\$(grep -h '\"type\":\"session_info\"' \"\$p\" 2>/dev/null | tail -1 | " +
                         "sed -n 's/.*\"name\":\"\\([^\"]*\\)\".*/\\1/p'); " +
-                        "printf '%s\\t%s\\n' \"\\\$p\" \"\\\$n\"; done",
-                )
-                val paths = out.lines().filter { it.isNotBlank() }
-                AppLog.i(TAG, "listSessions -> ${paths.size} files")
+                        "printf '%s\\t%s\\n' \"\$p\" \"\$n\"; done; }; " +
+                        "agentdir=\${PI_CODING_AGENT_DIR:-\$HOME/.pi/agent}; " +
+                        "sessdir=\${PI_CODING_AGENT_SESSION_DIR:-\$agentdir/sessions}; " +
+                        "echo \"SESSDIR:\$sessdir\"; lsSessions \"\$sessdir\"" +
+                        (fallbackDir?.let { "; fbd=${shellQuote(it)}; if [ -n \"\$fbd\" ] && [ \"\$fbd\" != \"\$sessdir\" ]; then lsSessions \"\$fbd\"; fi" } ?: "")
+                val out = SshConnector.runQuick(s.toSshConfig(), listFn)
+                val rawLines = out.lines()
+                val sessDir = rawLines.firstOrNull { it.startsWith("SESSDIR:") }
+                    ?.removePrefix("SESSDIR:")?.trim()?.takeIf { it.isNotBlank() }
+                val paths = rawLines.filter { it.isNotBlank() && !it.startsWith("SESSDIR:") }
+                AppLog.i(TAG, "listSessions dir=$sessDir -> ${paths.size} files")
                 val entries = paths.map { line ->
                     val path = line.substringBefore('\t')
                     val customName = line.substringAfter('\t', "").takeIf { it.isNotBlank() }
@@ -521,11 +544,13 @@ class PiViewModel(app: Application) : AndroidViewModel(app) {
                         name = customName ?: path.substringAfterLast('/'),
                         mtime = "",
                     )
-                }
-                _ui.value = _ui.value.copy(sessions = entries)
+                }.distinctBy { it.path }
+                _ui.value = _ui.value.copy(sessions = entries, sessionsDir = sessDir)
             } catch (e: Exception) {
                 AppLog.e(TAG, "listSessions FAILED: ${e.message}")
                 _ui.value = _ui.value.copy(error = "列会话失败: ${e.message}")
+            } finally {
+                _ui.value = _ui.value.copy(sessionsLoading = false)
             }
         }
     }
