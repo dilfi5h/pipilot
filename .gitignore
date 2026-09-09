@@ -23,3 +23,7 @@ RpcSmoke.class
 
 # Upstream pi.dev source (reference only, never commit)
 vendor/
+
+# Signing credentials (local only, never commit)
+pipilot-release.keystore
+keystore.properties

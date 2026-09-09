@@ -32,8 +32,22 @@ jobs:
         with:
           gradle-version: "8.9"
 
+      - name: Restore signing key
+        env:
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+          KEYSTORE_PROPERTIES: ${{ secrets.KEYSTORE_PROPERTIES }}
+        run: |
+          echo "$KEYSTORE_BASE64" | base64 -d > pipilot-release.keystore
+          echo "$KEYSTORE_PROPERTIES" > keystore.properties
+
       - name: Build debug APK
         run: gradle assembleDebug --no-daemon --stacktrace
+
+      - name: Verify signing cert (fail build on mismatch)
+        run: |
+          CERT=$(./tools/apk-cert-sha256.sh app/build/outputs/apk/debug/app-debug.apk)
+          echo "cert sha256: $CERT"
+          [ "$CERT" = "380325ded8f9ed0144ec77c022e73b49c1c1661dc6c717e848e9a9e5bdcd6f53" ]
 
       - name: Rename APK
         run: |

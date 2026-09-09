@@ -1,3 +1,5 @@
+import java.util.Properties
+
 plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.android)
@@ -5,21 +7,43 @@ plugins {
     alias(libs.plugins.kotlin.serialization)
 }
 
+// 签名密钥固定在仓库根的 pipilot-release.keystore(凭据在 keystore.properties,均不入 git)。
+// 固定密钥是为了让新旧 APK 能互相覆盖安装:Android 拒绝安装与已装版本签名不同的包。
+val keystoreProps = Properties().apply {
+    val f = rootProject.file("keystore.properties")
+    if (f.exists()) f.inputStream().use { load(it) }
+}
+
 android {
     namespace = "dev.pipilot.app"
     compileSdk = 35
+
+    signingConfigs {
+        create("pipilot") {
+            if (keystoreProps.isNotEmpty()) {
+                storeFile = rootProject.file(keystoreProps["storeFile"] as String)
+                storePassword = keystoreProps["storePassword"] as String
+                keyAlias = keystoreProps["keyAlias"] as String
+                keyPassword = keystoreProps["keyPassword"] as String
+            }
+        }
+    }
 
     defaultConfig {
         applicationId = "dev.pipilot.app"
         minSdk = 26
         targetSdk = 35
         // 手工版本号:实机测 OK 之前每次发验证包 +1,App 内标题栏可见,防止旧包覆盖装不上的糊涂账
-        versionCode = 5
-        versionName = "0.0.5"
+        versionCode = 6
+        versionName = "0.0.6"
     }
 
     buildTypes {
+        debug {
+            signingConfig = signingConfigs.getByName("pipilot")
+        }
         release {
+            signingConfig = signingConfigs.getByName("pipilot")
             isMinifyEnabled = true
             isShrinkResources = true
             proguardFiles(
