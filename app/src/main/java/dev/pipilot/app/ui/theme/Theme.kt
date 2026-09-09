@@ -7,16 +7,17 @@ import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.graphics.Color
 
-private val PiOrange = Color(0xFFFF7043)
-private val PiOrangeDim = Color(0xFFBF360C)
+// 品牌青,与 launcher 图标一致
+val PiCyan = Color(0xFF22D3EE)
+private val PiCyanDim = Color(0xFF0E7490)
 
 private val LightColors = lightColorScheme(
-    primary = PiOrangeDim,
+    primary = PiCyanDim,
     secondary = Color(0xFF546E7A),
     surface = Color(0xFFFAFAFA),
 )
 private val DarkColors = darkColorScheme(
-    primary = PiOrange,
+    primary = PiCyan,
     secondary = Color(0xFF90A4AE),
 )
 

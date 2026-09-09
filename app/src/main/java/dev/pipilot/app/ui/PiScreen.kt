@@ -1,6 +1,12 @@
 package dev.pipilot.app.ui
 
 import androidx.compose.animation.animateContentSize
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.combinedClickable
@@ -30,6 +36,8 @@ import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Build
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.ContentCopy
+import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.List
 import androidx.compose.material.icons.filled.Memory
 import androidx.compose.material.icons.filled.Settings
@@ -60,6 +68,7 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -71,10 +80,12 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import dev.pipilot.app.chat.ChatItem
+import dev.pipilot.app.chat.MarkdownText
 import dev.pipilot.app.rpc.PiModel
 import dev.pipilot.app.settings.ConnectionSettings
+import kotlinx.coroutines.launch
 
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
 fun PiScreen(viewModel: PiViewModel) {
     val ui by viewModel.ui.collectAsState()
@@ -82,6 +93,7 @@ fun PiScreen(viewModel: PiViewModel) {
     val snackbar = remember { SnackbarHostState() }
     var showSettings by remember { mutableStateOf(false) }
     var showSessions by remember { mutableStateOf(false) }
+    var showRename by remember { mutableStateOf(false) }
 
     LaunchedEffect(ui.error) {
         ui.error?.let {
@@ -119,7 +131,7 @@ fun PiScreen(viewModel: PiViewModel) {
                         }
                     },
                 )
-                // 会话名独立成一行:独占整行宽度,不再跟右上角图标抢地方
+                // 会话名独立成一行:独占整行宽度,不再跟右上角图标抢地方;点击可重命名
                 if (ui.connected) {
                     Surface(color = MaterialTheme.colorScheme.surface) {
                         Text(
@@ -129,6 +141,7 @@ fun PiScreen(viewModel: PiViewModel) {
                             maxLines = 1,
                             overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
                             modifier = Modifier.fillMaxWidth()
+                                .combinedClickable(onClick = { showRename = true })
                                 .padding(horizontal = 16.dp, vertical = 4.dp),
                         )
                     }
@@ -155,6 +168,9 @@ fun PiScreen(viewModel: PiViewModel) {
     }
     if (showSessions) {
         SessionsSheet(ui, viewModel, onDismiss = { showSessions = false })
+    }
+    if (showRename) {
+        RenameDialog(currentName = ui.state?.sessionName.orEmpty(), viewModel, onDismiss = { showRename = false })
     }
     ui.dialog?.let { d ->
         ExtensionDialog(d, onAnswer = viewModel::answerDialog)
@@ -268,45 +284,89 @@ private fun ReconnectBanner(ui: UiState, viewModel: PiViewModel) {
 @Composable
 private fun ChatList(ui: UiState, modifier: Modifier = Modifier) {
     val listState = rememberLazyListState()
+    // 条数变化或最后一条内容变化都贴底;用户主动往上翻(不在底部)时不打扰
+    val lastItemLen = ui.items.lastOrNull()?.let { it.textLength() } ?: 0
+    val lastKey = ui.items.lastOrNull()?.key
+    val followBottom = remember(ui.items.size) { mutableStateOf(true) }
     LaunchedEffect(ui.items.size) {
-        if (ui.items.isNotEmpty()) listState.animateScrollToItem(ui.items.size - 1)
+        if (ui.items.isNotEmpty() && followBottom.value) listState.animateScrollToItem(ui.items.size - 1)
     }
-    SelectionContainer(modifier) {
-        LazyColumn(
-            state = listState,
-            modifier = Modifier.fillMaxSize(),
-            contentPadding = androidx.compose.foundation.layout.PaddingValues(12.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp),
-        ) {
-            items(ui.items, key = { it.key }) { item ->
-                when (item) {
-                    is ChatItem.UserText -> UserBubble(item)
-                    is ChatItem.AssistantText -> AssistantBubble(item)
-                    is ChatItem.ToolCard -> ToolCard(item)
-                    is ChatItem.BashOutput -> BashCard(item)
-                    is ChatItem.SystemNote -> Text(
-                        item.text,
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.alpha(0.8f),
-                    )
-                    // RemoveLive 只在 VM 层消费,永远不会进列表,兜底不渲染
-                    else -> Unit
+    LaunchedEffect(lastKey, lastItemLen) {
+        if (ui.items.isNotEmpty() && followBottom.value) listState.scrollToItem(ui.items.size - 1)
+    }
+    // 用户往回滚(距底 >2 条)就停止跟随,回到底部附近恢复
+    LaunchedEffect(listState.isScrollInProgress) {
+        if (!listState.isScrollInProgress) {
+            val atBottom = listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index?.let { it >= ui.items.size - 2 } ?: true
+            followBottom.value = atBottom
+        }
+    }
+    Box(modifier) {
+        SelectionContainer(Modifier.fillMaxSize()) {
+            LazyColumn(
+                state = listState,
+                modifier = Modifier.fillMaxSize(),
+                contentPadding = androidx.compose.foundation.layout.PaddingValues(12.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                items(ui.items, key = { it.key }) { item ->
+                    when (item) {
+                        is ChatItem.UserText -> UserBubble(item)
+                        is ChatItem.AssistantText -> AssistantBubble(item)
+                        is ChatItem.ToolCard -> ToolCard(item)
+                        is ChatItem.BashOutput -> BashCard(item)
+                        is ChatItem.SystemNote -> Text(
+                            item.text,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.alpha(0.8f),
+                        )
+                        // RemoveLive 只在 VM 层消费,永远不会进列表,兜底不渲染
+                        else -> Unit
+                    }
+                }
+                if (ui.queueSteering.isNotEmpty() || ui.queueFollowUp.isNotEmpty()) {
+                    item(key = "queue") {
+                        Text(
+                            "排队中:${ui.queueSteering.size} 条 steering,${ui.queueFollowUp.size} 条 follow-up",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
                 }
             }
-            if (ui.queueSteering.isNotEmpty() || ui.queueFollowUp.isNotEmpty()) {
-                item(key = "queue") {
-                    Text(
-                        "排队中:${ui.queueSteering.size} 条 steering,${ui.queueFollowUp.size} 条 follow-up",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
+        }
+        // 上翻后出现,点击回到最新消息
+        if (!followBottom.value) {
+            val scope = androidx.compose.runtime.rememberCoroutineScope()
+            IconButton(
+                onClick = {
+                    followBottom.value = true
+                    if (ui.items.isNotEmpty()) scope.launch { listState.animateScrollToItem(ui.items.size - 1) }
+                },
+                modifier = Modifier
+                    .align(Alignment.BottomEnd)
+                    .padding(12.dp)
+                    .size(40.dp)
+                    .background(MaterialTheme.colorScheme.surfaceVariant, RoundedCornerShape(20.dp)),
+            ) {
+                Icon(Icons.Filled.KeyboardArrowDown, "滚到底部")
             }
         }
     }
 }
 
+/** 估算条目内容长度,用于流式期间检测"最后一条在变长"。*/
+private fun ChatItem.textLength(): Int = when (this) {
+    is ChatItem.UserText -> text.length
+    is ChatItem.AssistantText -> text.length
+    is ChatItem.ToolCard -> (output?.length ?: 0)
+    is ChatItem.BashOutput -> output.length
+    is ChatItem.SystemNote -> text.length
+    else -> 0
+}
+
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
 private fun UserBubble(item: ChatItem.UserText) {
     Column(horizontalAlignment = Alignment.End, modifier = Modifier.fillMaxWidth()) {
@@ -330,6 +390,7 @@ private fun UserBubble(item: ChatItem.UserText) {
     }
 }
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun AssistantBubble(item: ChatItem.AssistantText) {
     Column(modifier = Modifier.fillMaxWidth()) {
@@ -353,7 +414,7 @@ private fun AssistantBubble(item: ChatItem.AssistantText) {
                         )
                         Spacer(Modifier.size(6.dp))
                     }
-                    Text(item.text, style = MaterialTheme.typography.bodyMedium)
+                    MarkdownText(item.text)
                     if (item.streaming) {
                         BlinkingCursor()
                     }
@@ -374,7 +435,12 @@ private fun AssistantBubble(item: ChatItem.AssistantText) {
 
 @Composable
 private fun BlinkingCursor() {
-    Text("▍", color = MaterialTheme.colorScheme.primary)
+    val alpha = rememberInfiniteTransition(label = "cursor").animateFloat(
+        initialValue = 1f, targetValue = 0.15f,
+        animationSpec = infiniteRepeatable(tween(500, easing = LinearEasing), RepeatMode.Reverse),
+        label = "cursorAlpha",
+    )
+    Text("▍", color = MaterialTheme.colorScheme.primary, modifier = Modifier.alpha(alpha.value))
 }
 
 @Composable
@@ -693,6 +759,33 @@ private fun SessionsSheet(ui: UiState, viewModel: PiViewModel, onDismiss: () -> 
             },
         )
     }
+}
+
+@Composable
+private fun RenameDialog(currentName: String, viewModel: PiViewModel, onDismiss: () -> Unit) {
+    var input by remember { mutableStateOf(currentName) }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("重命名会话") },
+        text = {
+            OutlinedTextField(
+                value = input,
+                onValueChange = { input = it },
+                placeholder = { Text("留空则清除名称,显示文件名") },
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth(),
+            )
+        },
+        confirmButton = {
+            TextButton(onClick = {
+                viewModel.setSessionName(input.trim())
+                onDismiss()
+            }) { Text("确定") }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("取消") }
+        },
+    )
 }
 
 @Composable

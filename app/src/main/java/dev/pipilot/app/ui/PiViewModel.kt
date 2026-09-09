@@ -89,6 +89,10 @@ class PiViewModel(app: Application) : AndroidViewModel(app) {
     private var client: PiRpcClient? = null
     private val reducer = StreamReducer()
 
+    // 最近一次已连接会话的 session 文件;重连成功后用 `pi --mode rpc --session <path>` 恢复,
+    // 避免"断了丢现场"(新起的 pi 进程默认是空会话)
+    private var lastSessionFile: String? = null
+
     private val finalizedTools = HashMap<String, Boolean>()
 
     // 重连控制:connectEpoch 隔离过期循环,userDisconnect 标记手动断开
@@ -122,9 +126,11 @@ class PiViewModel(app: Application) : AndroidViewModel(app) {
         }
         return try {
             val cd = if (s.workDir.isNotBlank()) "cd ${shellQuote(s.workDir)} && " else ""
+            // 重连(resetItems=false)时带上次会话路径启动,恢复原会话;手动连接总是全新会话
+            val resumeArg = if (!resetItems) lastSessionFile?.let { " --session ${shellQuote(it)}" } ?: "" else ""
             val exec = SshConnector.connectAndExec(
                 SshConfig(s.host, s.port.toIntOrNull() ?: 22, s.user, auth),
-                "${cd}${s.piCommand}",
+                "${cd}${s.piCommand}$resumeArg",
             )
             if (epoch != connectEpoch) {
                 // 已过期:关掉刚建好的连接,结果作废
@@ -143,7 +149,7 @@ class PiViewModel(app: Application) : AndroidViewModel(app) {
                 items = if (resetItems) emptyList() else _ui.value.items,
             )
             refreshAll()
-            AppLog.i(TAG, "connect ok")
+            AppLog.i(TAG, "connect ok${if (!resetItems) " (resumed $lastSessionFile)" else ""}")
             true
         } catch (e: Exception) {
             AppLog.e(TAG, "connect attempt failed: ${e.javaClass.simpleName}: ${e.message}")
@@ -363,6 +369,8 @@ class PiViewModel(app: Application) : AndroidViewModel(app) {
             val resp = client?.request(PiCommands.named("new_session", id = id), id)
             if (resp?.success == true) {
                 AppLog.i(TAG, "new_session ok, cancelled=${resp.data?.get("cancelled")}")
+                // 新会话后清掉恢复目标:断线重连就该是新会话,不该回到旧会话
+                lastSessionFile = null
                 _ui.value = _ui.value.copy(
                     items = listOf(ChatItem.SystemNote("已新建会话", key = "new-session-${System.currentTimeMillis()}")),
                     statsText = null,
@@ -389,6 +397,8 @@ class PiViewModel(app: Application) : AndroidViewModel(app) {
         AppLog.i(TAG, "get_state -> ${if (resp == null) "TIMEOUT" else "success=${resp.success} err=${resp.error}"}")
         if (resp?.success == true && resp.data != null) {
             val state = PiState.from(JsonObject(mapOf("data" to resp.data!!)))
+            // 记住当前会话文件,断线重连时用 --session 恢复
+            state.sessionFile?.takeIf { it.isNotBlank() }?.let { lastSessionFile = it }
             _ui.value = _ui.value.copy(state = state)
             // 顺带刷新思考级别
             val tlId = PiCommands.nextId()
@@ -491,15 +501,26 @@ class PiViewModel(app: Application) : AndroidViewModel(app) {
         val s = settings.value
         viewModelScope.launch {
             try {
-                // session 文件可能在子目录(如 --root--/ 下):递归按 mtime 取最近 30 个
+                // session 文件可能在子目录(如 --root--/ 下):递归按 mtime 取最近 30 个;
+                // 每个文件抓最后一条 session_info 的 name 作为显示名(pi TUI 的命名就存在文件里)
                 val out = SshConnector.runQuick(
                     s.toSshConfig(),
-                    "find ~/.pi/agent/sessions -name '*.jsonl' -printf '%T@ %p\\n' 2>/dev/null | sort -rn | head -30 | cut -d' ' -f2-",
+                    "find ~/.pi/agent/sessions -name '*.jsonl' -printf '%T@ %p\\n' 2>/dev/null | sort -rn | head -30 | cut -d' ' -f2- | " +
+                        "while IFS= read -r p; do " +
+                        "n=\\$(grep -h '\"type\":\"session_info\"' \"\\\$p\" 2>/dev/null | tail -1 | " +
+                        "sed -n 's/.*\"name\":\"\\([^\"]*\\)\".*/\\1/p'); " +
+                        "printf '%s\\t%s\\n' \"\\\$p\" \"\\\$n\"; done",
                 )
                 val paths = out.lines().filter { it.isNotBlank() }
                 AppLog.i(TAG, "listSessions -> ${paths.size} files")
-                val entries = paths.map { path ->
-                    SessionEntryInfo(path, path.substringAfterLast('/'), "")
+                val entries = paths.map { line ->
+                    val path = line.substringBefore('\t')
+                    val customName = line.substringAfter('\t', "").takeIf { it.isNotBlank() }
+                    SessionEntryInfo(
+                        path = path,
+                        name = customName ?: path.substringAfterLast('/'),
+                        mtime = "",
+                    )
                 }
                 _ui.value = _ui.value.copy(sessions = entries)
             } catch (e: Exception) {
@@ -514,6 +535,7 @@ class PiViewModel(app: Application) : AndroidViewModel(app) {
             val line = PiCommands.switchSession(path)
             val resp = client?.request(line, extractId(line) ?: return@launch)
             if (resp?.success == true) {
+                lastSessionFile = path
                 _ui.value = _ui.value.copy(items = emptyList())
                 refreshAll()
             } else {
@@ -563,7 +585,13 @@ class PiViewModel(app: Application) : AndroidViewModel(app) {
 
     fun setSessionName(name: String) {
         viewModelScope.launch {
-            client?.sendLine(PiCommands.setSessionName(name))
+            val id = PiCommands.nextId()
+            val resp = client?.request(PiCommands.setSessionNameReq(name), id)
+            if (resp?.success == true) {
+                _ui.value = _ui.value.copy(state = _ui.value.state?.copy(sessionName = name.ifBlank { null }))
+            } else {
+                _ui.value = _ui.value.copy(error = "重命名失败: ${resp?.error ?: "无响应"}")
+            }
         }
     }
 

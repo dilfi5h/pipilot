@@ -294,7 +294,7 @@ object PiCommands {
     fun switchSession(path: String) =
         named("switch_session", mapOf("sessionPath" to JsonPrimitive(path)))
 
-    fun setSessionName(name: String) =
+    fun setSessionNameReq(name: String) =
         named("set_session_name", mapOf("name" to JsonPrimitive(name)))
 
     fun uiResponseValue(id: String, value: String): String =
