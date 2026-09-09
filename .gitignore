@@ -20,3 +20,6 @@ RpcSmoke.java
 RpcSmoke.class
 .smokecp
 .kotlin/
+
+# Upstream pi.dev source (reference only, never commit)
+vendor/

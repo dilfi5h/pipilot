@@ -1,7 +1,9 @@
 package dev.pipilot.app.ui
 
 import androidx.compose.animation.animateContentSize
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -634,25 +636,57 @@ private fun FilterChipSimple(label: String, selected: Boolean, onClick: () -> Un
     }
 }
 
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
 private fun SessionsSheet(ui: UiState, viewModel: PiViewModel, onDismiss: () -> Unit) {
+    var pendingDelete by remember { mutableStateOf<SessionEntryInfo?>(null) }
     ModalBottomSheet(onDismissRequest = onDismiss) {
         Column(Modifier.padding(horizontal = 16.dp)) {
             Text("会话(session 文件)", style = MaterialTheme.typography.titleMedium)
             Spacer(Modifier.size(8.dp))
+            Text(
+                "点按切换 · 长按删除",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Spacer(Modifier.size(4.dp))
             if (ui.sessions.isEmpty()) {
                 Text("没有找到 ~/.pi/agent/sessions 下的会话", color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
             LazyColumn(contentPadding = androidx.compose.foundation.layout.PaddingValues(bottom = 32.dp)) {
                 items(ui.sessions, key = { it.path }) { s ->
-                    TextButton(onClick = {
-                        viewModel.switchSession(s.path)
-                        onDismiss()
-                    }) { Text(s.name, fontFamily = FontFamily.Monospace) }
+                    TextButton(
+                        onClick = {
+                            viewModel.switchSession(s.path)
+                            onDismiss()
+                        },
+                        modifier = Modifier.combinedClickable(
+                            onClick = {
+                                viewModel.switchSession(s.path)
+                                onDismiss()
+                            },
+                            onLongClick = { pendingDelete = s },
+                        ),
+                    ) { Text(s.name, fontFamily = FontFamily.Monospace) }
                 }
             }
         }
+    }
+    pendingDelete?.let { target ->
+        AlertDialog(
+            onDismissRequest = { pendingDelete = null },
+            title = { Text("删除会话？") },
+            text = { Text("${target.name}\n\n将永久删除该 session 文件,不可恢复。") },
+            confirmButton = {
+                TextButton(onClick = {
+                    viewModel.deleteSession(target.path)
+                    pendingDelete = null
+                }) { Text("删除", color = MaterialTheme.colorScheme.error) }
+            },
+            dismissButton = {
+                TextButton(onClick = { pendingDelete = null }) { Text("取消") }
+            },
+        )
     }
 }
 

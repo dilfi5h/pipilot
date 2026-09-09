@@ -522,6 +522,45 @@ class PiViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    /**
+     * 删除会话文件。RPC 无 delete 命令,与 pi TUI 的 deleteSessionFile 一致走文件级删除;
+     * 当前激活的会话拒绝删除(与 TUI 行为相同)。用单引号包路径防止 shell 元字符注入。
+     */
+    fun deleteSession(path: String) {
+        viewModelScope.launch {
+            val s = settings.value
+            val active = _ui.value.state?.sessionFile
+            if (active != null && pathsEqual(active, path)) {
+                _ui.value = _ui.value.copy(error = "不能删除当前会话,请先切换到其他会话")
+                return@launch
+            }
+            try {
+                val quoted = "'" + path.replace("'", "'\\''") + "'"
+                val out = SshConnector.runQuick(
+                    s.toSshConfig(),
+                    "rm -f $quoted && [ ! -e $quoted ] && echo DELETED || echo FAILED",
+                )
+                if (out.contains("DELETED")) {
+                    AppLog.i(TAG, "deleteSession OK: $path")
+                    _ui.value = _ui.value.copy(sessions = _ui.value.sessions.filter { it.path != path })
+                } else {
+                    AppLog.e(TAG, "deleteSession FAILED: $path, out=$out")
+                    _ui.value = _ui.value.copy(error = "删除失败: $out")
+                }
+            } catch (e: Exception) {
+                AppLog.e(TAG, "deleteSession ERROR: ${e.message}")
+                _ui.value = _ui.value.copy(error = "删除失败: ${e.message}")
+            }
+        }
+    }
+
+    private fun pathsEqual(a: String, b: String): Boolean {
+        if (a == b) return true
+        // 容忍尾部差异:sessionFile 可能带或不带扩展名/相对前缀,比对规范化后的绝对路径
+        val norm = { p: String -> p.removePrefix("~/").removePrefix("/root/").trimEnd('/') }
+        return norm(a) == norm(b)
+    }
+
     fun setSessionName(name: String) {
         viewModelScope.launch {
             client?.sendLine(PiCommands.setSessionName(name))

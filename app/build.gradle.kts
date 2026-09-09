@@ -14,8 +14,8 @@ android {
         minSdk = 26
         targetSdk = 35
         // 手工版本号:实机测 OK 之前每次发验证包 +1,App 内标题栏可见,防止旧包覆盖装不上的糊涂账
-        versionCode = 4
-        versionName = "0.0.4"
+        versionCode = 5
+        versionName = "0.0.5"
     }
 
     buildTypes {
