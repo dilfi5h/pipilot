@@ -226,6 +226,7 @@ data class ChatMessage(
                     when (b.str("type")) {
                         "text" -> ContentBlock("text", b.str("text"), null, null, null)
                         "thinking" -> ContentBlock("thinking", b.str("thinking"), null, null, null)
+                        "image" -> ContentBlock("image", null, null, null, null)
                         "toolCall" -> ContentBlock(
                             type = "toolCall",
                             text = null,
@@ -284,12 +285,28 @@ object PiCommands {
     var counter = 0
     fun nextId(): String = "app-${System.currentTimeMillis()}-${counter++}"
 
-    fun prompt(message: String, streamingBehavior: String? = null): String {
+    fun prompt(
+        message: String,
+        streamingBehavior: String? = null,
+        images: List<Pair<String, String>> = emptyList(),
+    ): String {
         val obj = buildMap {
             put("id", JsonPrimitive(nextId()))
             put("type", JsonPrimitive("prompt"))
             put("message", JsonPrimitive(message))
             if (streamingBehavior != null) put("streamingBehavior", JsonPrimitive(streamingBehavior))
+            if (images.isNotEmpty()) {
+                put(
+                    "images",
+                    JsonArray(images.map { (base64, mimeType) ->
+                        JsonObject(mapOf(
+                            "type" to JsonPrimitive("image"),
+                            "data" to JsonPrimitive(base64),
+                            "mimeType" to JsonPrimitive(mimeType),
+                        ))
+                    }),
+                )
+            }
         }
         return JsonObject(obj).toString()
     }

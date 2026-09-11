@@ -17,10 +17,12 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
@@ -37,6 +39,7 @@ import androidx.compose.material.icons.filled.Build
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.ContentCopy
+import androidx.compose.material.icons.filled.Image
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.List
 import androidx.compose.material.icons.filled.Memory
@@ -66,6 +69,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -75,6 +79,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -89,7 +94,7 @@ import kotlinx.coroutines.launch
 @Composable
 fun PiScreen(viewModel: PiViewModel) {
     val ui by viewModel.ui.collectAsState()
-    val settings by viewModel.settings.collectAsState()
+    val settings by viewModel.activeSettings.collectAsState()
     val snackbar = remember { SnackbarHostState() }
     var showSettings by remember { mutableStateOf(false) }
     var showSessions by remember { mutableStateOf(false) }
@@ -376,7 +381,18 @@ private fun UserBubble(item: ChatItem.UserText) {
                 contentColor = MaterialTheme.colorScheme.onPrimary,
                 shape = RoundedCornerShape(16.dp, 4.dp, 16.dp, 16.dp),
             ) {
-                Text(item.text, Modifier.padding(12.dp), style = MaterialTheme.typography.bodyMedium)
+                Column(Modifier.padding(12.dp)) {
+                    if (item.imageCount > 0) {
+                        Text(
+                            "🖼 × ${item.imageCount}",
+                            style = MaterialTheme.typography.labelLarge,
+                        )
+                        if (item.text.isNotBlank()) Spacer(Modifier.size(4.dp))
+                    }
+                    if (item.text.isNotBlank()) {
+                        Text(item.text, style = MaterialTheme.typography.bodyMedium)
+                    }
+                }
             }
         }
         if (item.timeMs > 0) {
@@ -521,15 +537,85 @@ private fun BashCard(item: ChatItem.BashOutput) {
 @Composable
 private fun InputBar(viewModel: PiViewModel, ui: UiState) {
     var text by rememberSaveable { mutableStateOf("") }
+    var preparing by remember { mutableStateOf(false) }
+    // 待发送图片的 base64 体积大,不进 rememberSaveable,只放 composition 内的 remember
+    val pendingImagePayloads = remember { mutableStateListOf<dev.pipilot.app.chat.PreparedImage>() }
+    val context = androidx.compose.ui.platform.LocalContext.current
+    val scope = rememberCoroutineScope()
+    val picker = androidx.activity.compose.rememberLauncherForActivityResult(
+        androidx.activity.result.contract.ActivityResultContracts.GetMultipleContents(),
+    ) { uris ->
+        if (uris.isEmpty()) return@rememberLauncherForActivityResult
+        val slotsLeft = (4 - pendingImagePayloads.size).coerceAtLeast(0)
+        if (slotsLeft <= 0) {
+            android.widget.Toast.makeText(context, "最多附带 4 张图片", android.widget.Toast.LENGTH_SHORT).show()
+            return@rememberLauncherForActivityResult
+        }
+        preparing = true
+        scope.launch(kotlinx.coroutines.Dispatchers.IO) {
+            val prepared = uris.take(slotsLeft).mapNotNull { uri ->
+                runCatching { dev.pipilot.app.chat.prepareImageForUpload(context, uri) }
+                    .onFailure { dev.pipilot.app.log.AppLog.e("InputBar", "prepareImage failed: ${it.javaClass.simpleName}: ${it.message}") }
+                    .getOrNull()
+            }
+            if (prepared.size < uris.size) {
+                kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
+                    android.widget.Toast.makeText(context, "有 ${uris.size - prepared.size} 张图片读取失败,已跳过", android.widget.Toast.LENGTH_SHORT).show()
+                }
+            }
+            pendingImagePayloads.addAll(prepared)
+            preparing = false
+        }
+    }
     Surface(tonalElevation = 3.dp) {
         Column(Modifier.fillMaxWidth().imePadding()) {
             // 状态条:模型 · thinking · token/上下文,固定单行,输入框正上方,绝不遮挡
             StatusStrip(ui)
+            if (pendingImagePayloads.isNotEmpty()) {
+                LazyRow(
+                    Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 4.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    items(pendingImagePayloads.size) { idx ->
+                        Box {
+                            androidx.compose.foundation.Image(
+                                bitmap = pendingImagePayloads[idx].thumbnail.asImageBitmap(),
+                                contentDescription = "待发送图片 ${idx + 1}",
+                                modifier = Modifier
+                                    .size(64.dp)
+                                    .background(
+                                        MaterialTheme.colorScheme.surfaceVariant,
+                                        RoundedCornerShape(8.dp),
+                                    ),
+                            )
+                            Surface(
+                                shape = androidx.compose.foundation.shape.CircleShape,
+                                color = MaterialTheme.colorScheme.errorContainer,
+                                modifier = Modifier.align(Alignment.TopEnd),
+                            ) {
+                                IconButton(
+                                    onClick = { pendingImagePayloads.removeAt(idx) },
+                                    modifier = Modifier.size(20.dp),
+                                ) {
+                                    Icon(Icons.Filled.Close, "移除", tint = MaterialTheme.colorScheme.onErrorContainer, modifier = Modifier.size(14.dp))
+                                }
+                            }
+                        }
+                    }
+                }
+            }
             Row(
                 Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 6.dp),
                 verticalAlignment = Alignment.Bottom,
             ) {
             val streaming = ui.state?.isStreaming == true
+            IconButton(
+                onClick = { picker.launch("image/*") },
+                enabled = !preparing && pendingImagePayloads.size < 4,
+            ) {
+                if (preparing) CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp)
+                else Icon(Icons.Filled.Image, "添加图片")
+            }
             OutlinedTextField(
                 value = text,
                 onValueChange = { text = it },
@@ -544,10 +630,16 @@ private fun InputBar(viewModel: PiViewModel, ui: UiState) {
             }
             IconButton(
                 onClick = {
-                    viewModel.sendPrompt(text)
+                    val images = pendingImagePayloads.map { it.base64 to it.mimeType }
+                    if (images.isNotEmpty()) {
+                        val kb = images.sumOf { it.first.length } / 1024
+                        dev.pipilot.app.log.AppLog.i("InputBar", "sendPrompt with ${images.size} image(s), ~${kb}KB base64")
+                    }
+                    viewModel.sendPrompt(text, images)
                     text = ""
+                    pendingImagePayloads.clear()
                 },
-                enabled = text.isNotBlank(),
+                enabled = text.isNotBlank() || pendingImagePayloads.isNotEmpty(),
             ) {
                 Icon(Icons.AutoMirrored.Filled.Send, "发送")
             }
@@ -577,7 +669,11 @@ private fun StatusStrip(ui: UiState) {
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun SettingsSheet(settings: ConnectionSettings, viewModel: PiViewModel, onDismiss: () -> Unit) {
-    var draft by remember { mutableStateOf(settings) }
+    val profiles by viewModel.profiles.collectAsState()
+    var profileName by remember(profiles.activeProfileName, settings) {
+        mutableStateOf(profiles.activeProfileName ?: "default")
+    }
+    var draft by remember(profiles.activeProfileName, settings) { mutableStateOf(settings) }
     ModalBottomSheet(onDismissRequest = onDismiss) {
         Column(
             Modifier
@@ -586,6 +682,43 @@ private fun SettingsSheet(settings: ConnectionSettings, viewModel: PiViewModel, 
                 .padding(horizontal = 16.dp)
         ) {
             Text("SSH 连接", style = MaterialTheme.typography.titleMedium)
+            Spacer(Modifier.size(8.dp))
+            if (profiles.profiles.size > 1 || (profiles.profiles.size == 1 && profiles.profiles[0].name != profileName)) {
+                profiles.profiles.forEach { p ->
+                    val selected = p.name == profiles.activeProfileName
+                    Row(
+                        Modifier.fillMaxWidth().padding(vertical = 2.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        TextButton(
+                            onClick = {
+                                viewModel.setActiveProfile(p.name)
+                                profileName = p.name
+                                draft = p.settings
+                            },
+                            modifier = Modifier.weight(1f),
+                        ) {
+                            Text(
+                                (if (selected) "✓ " else "") + p.name +
+                                    " (${p.settings.user}@${p.settings.host})",
+                                maxLines = 1,
+                                overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+                            )
+                        }
+                        if (!selected) {
+                            TextButton(onClick = { viewModel.deleteProfile(p.name) }) {
+                                Text("删除", color = MaterialTheme.colorScheme.error)
+                            }
+                        }
+                    }
+                }
+                Spacer(Modifier.size(4.dp))
+            }
+            OutlinedTextField(
+                value = profileName, onValueChange = { profileName = it },
+                label = { Text("主机名(保存为多主机配置)") },
+                modifier = Modifier.fillMaxWidth(), singleLine = true,
+            )
             Spacer(Modifier.size(8.dp))
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 OutlinedTextField(
@@ -634,12 +767,12 @@ private fun SettingsSheet(settings: ConnectionSettings, viewModel: PiViewModel, 
             Spacer(Modifier.size(16.dp))
             Row(Modifier.padding(bottom = 24.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 Button(onClick = {
-                    viewModel.saveSettings(draft)
+                    viewModel.saveProfile(profileName, draft)
                     onDismiss()
                 }) { Text("保存") }
                 if (viewModel.ui.value.connected) {
                     OutlinedButton(onClick = {
-                        viewModel.saveSettings(draft)
+                        viewModel.saveProfile(profileName, draft)
                         viewModel.disconnect()
                         onDismiss()
                     }) { Text("保存并断开") }

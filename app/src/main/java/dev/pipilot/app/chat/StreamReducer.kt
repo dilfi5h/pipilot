@@ -137,6 +137,13 @@ class StreamReducer {
                     key = "retry",
                 )
             )
+            "auto_retry_end" -> {
+                // 最终失败必须浮出:success=false 带 finalError,否则用户只见"卡住"不知何故
+                if (event.raw.boolOrNull("success") == false) {
+                    val err = event.raw.str("finalError") ?: "未知错误"
+                    sink(ChatItem.SystemNote("请求失败(已重试 ${event.raw.intOrNull("attempt") ?: "?"} 次): ${err.take(300)}", key = "retry-final"))
+                }
+            }
             "extension_error" -> sink(
                 ChatItem.SystemNote("扩展错误: ${event.raw.str("error")}", key = "ext-err")
             )
@@ -201,3 +208,8 @@ private fun kotlinx.serialization.json.JsonObject.str(key: String): String? =
 
 private fun kotlinx.serialization.json.JsonObject.intOrNull(key: String): Int? =
     (this[key] as? kotlinx.serialization.json.JsonPrimitive)?.content?.toIntOrNull()
+
+private fun kotlinx.serialization.json.JsonObject.boolOrNull(key: String): Boolean? =
+    (this[key] as? kotlinx.serialization.json.JsonPrimitive)?.content?.let {
+        when (it) { "true" -> true; "false" -> false; else -> null }
+    }

@@ -25,6 +25,7 @@ sealed interface ChatItem {
         val text: String,
         override val key: String,
         override val timeMs: Long = System.currentTimeMillis(),
+        val imageCount: Int = 0,
     ) : ChatItem
 
     @Immutable

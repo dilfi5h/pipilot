@@ -18,6 +18,8 @@ import dev.pipilot.app.rpc.parseLine
 import dev.pipilot.app.rpc.PiLine
 import dev.pipilot.app.rpc.piJson
 import dev.pipilot.app.settings.ConnectionSettings
+import dev.pipilot.app.settings.HostProfilesState
+import dev.pipilot.app.settings.HostProfileStore
 import dev.pipilot.app.settings.SettingsStore
 import dev.pipilot.app.ssh.SshConfig
 import dev.pipilot.app.ssh.SshConnector
@@ -85,6 +87,16 @@ class PiViewModel(app: Application) : AndroidViewModel(app) {
     val settings: StateFlow<ConnectionSettings> =
         settingsStore.settings.stateIn(viewModelScope, SharingStarted.Eagerly, ConnectionSettings())
 
+    private val hostProfiles = HostProfileStore(settingsStore)
+    val profiles: StateFlow<HostProfilesState> =
+        hostProfiles.state.stateIn(viewModelScope, SharingStarted.Eagerly, HostProfilesState())
+
+    /** 当前生效的连接配置:多主机选中项,回退到老单配置。 */
+    val activeSettings: StateFlow<ConnectionSettings> = kotlinx.coroutines.flow.combine(
+        profiles, settings,
+    ) { p, legacy -> p.active.takeIf { it.isValid } ?: legacy }
+        .stateIn(viewModelScope, SharingStarted.Eagerly, ConnectionSettings())
+
     private val _ui = MutableStateFlow(UiState())
     val ui: StateFlow<UiState> = _ui.asStateFlow()
 
@@ -109,6 +121,24 @@ class PiViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch { settingsStore.save(s) }
     }
 
+    /** 保存当前编辑的主机配置(新建或覆盖同名),并设为当前选中。 */
+    fun saveProfile(name: String, s: ConnectionSettings) {
+        val profileName = name.trim().ifBlank { "default" }
+        viewModelScope.launch {
+            hostProfiles.saveProfile(profileName, s)
+            // 老单配置同步一份,保持旧读取路径可用
+            settingsStore.save(s)
+        }
+    }
+
+    fun setActiveProfile(name: String) {
+        viewModelScope.launch { hostProfiles.setActive(name) }
+    }
+
+    fun deleteProfile(name: String) {
+        viewModelScope.launch { hostProfiles.deleteProfile(name) }
+    }
+
     fun connect() {
         userDisconnect = false
         reconnectJob?.cancel()
@@ -122,7 +152,7 @@ class PiViewModel(app: Application) : AndroidViewModel(app) {
      * @param resetItems 成功后是否清空聊天列表(手动连接清空,重连保留后由 loadHistory 刷新)。
      */
     private suspend fun attemptConnect(epoch: Int, resetItems: Boolean = true): Boolean {
-        val s = settings.value
+        val s = activeSettings.value
         if (!s.isValid) return false
         val auth = if (s.authType == "key") {
             SshConfig.Auth.PrivateKey(s.privateKey, s.keyPassphrase.ifBlank { null })
@@ -337,22 +367,23 @@ class PiViewModel(app: Application) : AndroidViewModel(app) {
 
     // ---------- 用户动作 ----------
 
-    fun sendPrompt(text: String) {
+    fun sendPrompt(text: String, images: List<Pair<String, String>> = emptyList()) {
         val msg = text.trim()
-        if (msg.isEmpty() || client == null) return
+        if ((msg.isEmpty() && images.isEmpty()) || client == null) return
         val isStreaming = _ui.value.state?.isStreaming == true
         val line = if (isStreaming) {
             // 正在流式:默认用 followUp 排队,避免 steering 打断工具执行
-            PiCommands.prompt(msg, streamingBehavior = "followUp")
+            PiCommands.prompt(msg, streamingBehavior = "followUp", images = images)
         } else {
-            PiCommands.prompt(msg)
+            PiCommands.prompt(msg, images = images)
         }
         viewModelScope.launch {
             val resp = client?.request(line, extractId(line) ?: return@launch)
             if (resp != null && !resp.success) {
                 _ui.value = _ui.value.copy(error = "prompt 被拒绝: ${resp.error}")
             } else {
-                _ui.value = _ui.value.copy(items = _ui.value.items + ChatItem.UserText(msg, key = "user-${System.nanoTime()}"))
+                val label = if (msg.isNotEmpty()) msg else "（已发送 ${images.size} 张图片）"
+                _ui.value = _ui.value.copy(items = _ui.value.items + ChatItem.UserText(label, key = "user-${System.nanoTime()}", imageCount = images.size))
             }
         }
     }
@@ -430,7 +461,7 @@ class PiViewModel(app: Application) : AndroidViewModel(app) {
 
     /** Read global and project pi settings; project enabledModels overrides global. */
     private suspend fun readEnabledModelPatterns(): List<String>? {
-        val s = settings.value
+        val s = activeSettings.value
         return runCatching {
             val projectSettings = s.workDir.trimEnd('/') + "/.pi/settings.json"
             val cmd = "for f in \"\${PI_CODING_AGENT_DIR:-\$HOME/.pi/agent}/settings.json\" ${shellQuote(projectSettings)}; do [ -f \"\$f\" ] && printf '%s\\n' \"\$f\"; done"
@@ -488,8 +519,12 @@ class PiViewModel(app: Application) : AndroidViewModel(app) {
             val obj = (entry["message"] as? JsonObject) ?: continue
             val msg = dev.pipilot.app.rpc.ChatMessage.from(obj)
             when (msg.role) {
-                "user" -> msg.blocks.firstNotNullOfOrNull { b -> b.text }?.let {
-                    items.add(ChatItem.UserText(it, key = "hist-u-${entry.str("id") ?: items.size}", timeMs = msg.timestamp ?: 0))
+                "user" -> {
+                    val text = msg.blocks.firstNotNullOfOrNull { b -> b.text }.orEmpty()
+                    val imageCount = msg.blocks.count { it.type == "image" }
+                    if (text.isNotBlank() || imageCount > 0) {
+                        items.add(ChatItem.UserText(text.ifBlank { "（${imageCount} 张图片）" }, key = "hist-u-${entry.str("id") ?: items.size}", timeMs = msg.timestamp ?: 0, imageCount = imageCount))
+                    }
                 }
                 "assistant" -> {
                     val text = msg.blocks.filter { it.type == "text" }.joinToString("") { it.text ?: "" }
@@ -537,7 +572,7 @@ class PiViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun listSessions() {
-        val s = settings.value
+        val s = activeSettings.value
         if (_ui.value.sessionsLoading) return
         viewModelScope.launch {
             _ui.value = _ui.value.copy(sessionsLoading = true)
@@ -613,7 +648,7 @@ class PiViewModel(app: Application) : AndroidViewModel(app) {
      */
     fun deleteSession(path: String) {
         viewModelScope.launch {
-            val s = settings.value
+            val s = activeSettings.value
             val active = _ui.value.state?.sessionFile
             if (active != null && pathsEqual(active, path)) {
                 _ui.value = _ui.value.copy(error = "不能删除当前会话,请先切换到其他会话")

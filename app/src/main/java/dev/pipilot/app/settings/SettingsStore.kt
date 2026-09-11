@@ -62,4 +62,14 @@ class SettingsStore(private val context: Context) {
             p[WORK_DIR] = s.workDir
         }
     }
+
+    /** 多主机配置用的底层读写:profiles JSON + 当前选中名。 */
+    internal val profilesPreferences: Flow<androidx.datastore.preferences.core.Preferences> =
+        context.dataStore.data
+
+    internal suspend fun editProfiles(
+        block: (androidx.datastore.preferences.core.MutablePreferences) -> Unit,
+    ) {
+        context.dataStore.edit(block)
+    }
 }
