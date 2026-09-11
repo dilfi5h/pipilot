@@ -6,9 +6,9 @@ import java.util.Date
 import java.util.Locale
 import java.util.TimeZone
 
-/** 东八区时间戳格式(HH:mm),每条对话气泡下显示。*/
+/** 东八区时间戳格式(HH:mm:ss),每条对话气泡下显示。*/
 fun formatShanghai(millis: Long): String {
-    val f = SimpleDateFormat("HH:mm", Locale.getDefault())
+    val f = SimpleDateFormat("HH:mm:ss", Locale.getDefault())
     f.timeZone = TimeZone.getTimeZone("Asia/Shanghai")
     return f.format(Date(millis))
 }

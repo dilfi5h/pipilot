@@ -39,6 +39,9 @@ class StreamReducer {
                 liveText = StringBuilder()
                 liveThinking = StringBuilder()
                 liveToolCalls.clear()
+                // agent 一启动就放空气泡占位:首 token 前的服务端思考期(可达 10-40s)
+                // 也要有闪动光标,否则用户面对的是一片死寂
+                sink(ChatItem.AssistantText(text = "", thinking = null, streaming = true, key = "live"))
             }
 
             "message_update" -> {
@@ -102,14 +105,13 @@ class StreamReducer {
             }
 
             "message_end" -> {
-                // 权威终态:整条消息落库,同时让 VM 删掉 live 气泡(避免一条回复显示两次)
-                val msgObj = event.message
-                if (msgObj != null) {
-                    val msg = ChatMessage.from(msgObj)
-                    if (msg.role == "assistant") {
-                        flushAssistantFromMessage(msg, sink)
-                    }
-                }
+                // 权威终态:整条消息落库,同时让 VM 删掉 live 气泡(避免一条回复显示两次)。
+                // 只对 assistant 收尾:user 消息的 message_end 回显紧跟 prompt 到达,
+                // 不能清 live 状态(会掐掉 agent_start 刚放的等待光标气泡)
+                val msgObj = event.message ?: return
+                val msg = ChatMessage.from(msgObj)
+                if (msg.role != "assistant") return
+                flushAssistantFromMessage(msg, sink)
                 liveText = StringBuilder()
                 liveThinking = StringBuilder()
                 liveToolCalls.clear()
