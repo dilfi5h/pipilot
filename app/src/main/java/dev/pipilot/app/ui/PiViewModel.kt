@@ -10,6 +10,7 @@ import dev.pipilot.app.log.AppLog
 import dev.pipilot.app.rpc.PiCommands
 import dev.pipilot.app.rpc.PiEvent
 import dev.pipilot.app.rpc.PiModel
+import dev.pipilot.app.rpc.filterEnabledModels
 import dev.pipilot.app.rpc.PiResponse
 import dev.pipilot.app.rpc.PiRpcClient
 import dev.pipilot.app.rpc.PiState
@@ -94,6 +95,8 @@ class PiViewModel(app: Application) : AndroidViewModel(app) {
     // 最近一次已连接会话的 session 文件;重连成功后用 `pi --mode rpc --session <path>` 恢复,
     // 避免"断了丢现场"(新起的 pi 进程默认是空会话)
     private var lastSessionFile: String? = null
+    /** 当前会话已同步到的最后一个 append-only entry id。*/
+    private var lastEntryId: String? = null
 
     private val finalizedTools = HashMap<String, Boolean>()
 
@@ -168,6 +171,7 @@ class PiViewModel(app: Application) : AndroidViewModel(app) {
     private fun doConnect(resetItems: Boolean, epoch: Int) {
         if (_ui.value.connecting) return
         viewModelScope.launch {
+            if (resetItems) lastEntryId = null
             _ui.value = _ui.value.copy(
                 connecting = true, error = null,
                 reconnecting = false, reconnectAttempt = 0, reconnectCountdown = 0,
@@ -373,6 +377,7 @@ class PiViewModel(app: Application) : AndroidViewModel(app) {
                 AppLog.i(TAG, "new_session ok, cancelled=${resp.data?.get("cancelled")}")
                 // 新会话后清掉恢复目标:断线重连就该是新会话,不该回到旧会话
                 lastSessionFile = null
+                lastEntryId = null
                 _ui.value = _ui.value.copy(
                     items = listOf(ChatItem.SystemNote("已新建会话", key = "new-session-${System.currentTimeMillis()}")),
                     statsText = null,
@@ -414,11 +419,34 @@ class PiViewModel(app: Application) : AndroidViewModel(app) {
     private suspend fun refreshModels() {
         val line = PiCommands.named("get_available_models")
         val resp = client?.request(line, extractId(line) ?: return)
-        val models = (resp?.data?.get("models") as? JsonArray)
+        val available = (resp?.data?.get("models") as? JsonArray)
             ?.mapNotNull { (it as? JsonObject)?.let { o -> PiModel.from(o) } }
             ?: emptyList()
-        AppLog.i(TAG, "get_available_models -> ${if (resp == null) "TIMEOUT" else "success=${resp.success} count=${models.size}"}")
+        val patterns = readEnabledModelPatterns()
+        val models = filterEnabledModels(available, patterns)
+        AppLog.i(TAG, "get_available_models -> ${if (resp == null) "TIMEOUT" else "success=${resp.success} available=${available.size} filtered=${models.size} patterns=${patterns?.size ?: 0}"}")
         _ui.value = _ui.value.copy(models = models)
+    }
+
+    /** Read global and project pi settings; project enabledModels overrides global. */
+    private suspend fun readEnabledModelPatterns(): List<String>? {
+        val s = settings.value
+        return runCatching {
+            val projectSettings = s.workDir.trimEnd('/') + "/.pi/settings.json"
+            val cmd = "for f in \"\${PI_CODING_AGENT_DIR:-\$HOME/.pi/agent}/settings.json\" ${shellQuote(projectSettings)}; do [ -f \"\$f\" ] && printf '%s\\n' \"\$f\"; done"
+            val files = SshConnector.runQuick(s.toSshConfig(), cmd).lines().filter { it.isNotBlank() }
+            var selected: List<String>? = null
+            for (file in files) {
+                val text = SshConnector.runQuick(s.toSshConfig(), "cat ${shellQuote(file)}")
+                val obj = runCatching { piJson.parseToJsonElement(text).jsonObject }.getOrNull() ?: continue
+                val arr = obj["enabledModels"] as? JsonArray
+                if (arr != null) selected = arr.mapNotNull { (it as? JsonPrimitive)?.contentOrNull }
+            }
+            selected
+        }.getOrElse {
+            AppLog.e(TAG, "read enabledModels failed: ${it.javaClass.simpleName}")
+            null
+        }
     }
 
     private suspend fun refreshStats() {
@@ -440,24 +468,33 @@ class PiViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     private suspend fun loadHistory() {
+        val since = lastEntryId
         val id = PiCommands.nextId()
-        val resp = client?.request(PiCommands.named("get_messages", id = id), id)
-        val msgs = (resp?.data?.get("messages") as? JsonArray)
-        AppLog.i(TAG, "get_messages -> ${if (resp == null) "TIMEOUT" else "success=${resp.success} count=${msgs?.size}"}")
-        if (msgs == null) return
+        var resp = client?.request(PiCommands.getEntries(since, id), id)
+        // 服务端找不到游标时，退回全量同步并重置本地历史。
+        if (resp?.success != true && since != null) {
+            AppLog.i(TAG, "get_entries since=$since failed; retrying full")
+            lastEntryId = null
+            val retryId = PiCommands.nextId()
+            resp = client?.request(PiCommands.getEntries(id = retryId), retryId)
+        }
+        val entries = (resp?.data?.get("entries") as? JsonArray)
+        AppLog.i(TAG, "get_entries -> ${if (resp == null) "TIMEOUT" else "success=${resp.success} since=${since ?: "<full>"} count=${entries?.size}"}")
+        if (entries == null || resp?.success != true) return
         val items = ArrayList<ChatItem>()
-        for (m in msgs) {
-            val obj = m as? JsonObject ?: continue
+        for (entryElement in entries) {
+            val entry = entryElement as? JsonObject ?: continue
+            entry.str("id")?.takeIf { it.isNotBlank() }?.let { lastEntryId = it }
+            val obj = (entry["message"] as? JsonObject) ?: continue
             val msg = dev.pipilot.app.rpc.ChatMessage.from(obj)
             when (msg.role) {
                 "user" -> msg.blocks.firstNotNullOfOrNull { b -> b.text }?.let {
-                    items.add(ChatItem.UserText(it, key = "hist-u-${items.size}", timeMs = msg.timestamp ?: 0))
+                    items.add(ChatItem.UserText(it, key = "hist-u-${entry.str("id") ?: items.size}", timeMs = msg.timestamp ?: 0))
                 }
                 "assistant" -> {
                     val text = msg.blocks.filter { it.type == "text" }.joinToString("") { it.text ?: "" }
                     val thinking = msg.blocks.filter { it.type == "thinking" }.joinToString("") { it.text ?: "" }
-                    if (text.isNotEmpty()) items.add(ChatItem.AssistantText(text, thinking.ifEmpty { null }, false, key = "hist-a-${items.size}", timeMs = msg.timestamp ?: 0))
-                    // 工具调用用 toolResult 内容补卡片
+                    if (text.isNotEmpty()) items.add(ChatItem.AssistantText(text, thinking.ifEmpty { null }, false, key = "hist-a-${entry.str("id") ?: items.size}", timeMs = msg.timestamp ?: 0))
                     for (tc in msg.blocks.filter { it.type == "toolCall" }) {
                         items.add(ChatItem.ToolCard(tc.toolCallId ?: "call-${items.size}", tc.toolName ?: "?", tc.argumentsJson, null, running = false, isError = false))
                     }
@@ -474,13 +511,13 @@ class PiViewModel(app: Application) : AndroidViewModel(app) {
                 "bashExecution" -> {
                     val cmd = msg.blocks.firstOrNull()?.toolName
                     val out = msg.blocks.firstOrNull()?.text ?: ""
-                    items.add(ChatItem.BashOutput(cmd, out, running = false, key = "hist-bash-${items.size}"))
+                    items.add(ChatItem.BashOutput(cmd, out, running = false, key = "hist-bash-${entry.str("id") ?: items.size}"))
                 }
             }
         }
-        // 保留已有的 SystemNote(如"已新建会话"),历史消息追加其后
-        val notes = _ui.value.items.filterIsInstance<ChatItem.SystemNote>()
-        _ui.value = _ui.value.copy(items = notes + items)
+        val old = _ui.value.items
+        val base = if (since == null) old.filterIsInstance<ChatItem.SystemNote>() else old
+        _ui.value = _ui.value.copy(items = if (since == null) base + items else mergeItems(base, items))
     }
 
     fun setModel(model: PiModel) {
@@ -561,6 +598,7 @@ class PiViewModel(app: Application) : AndroidViewModel(app) {
             val resp = client?.request(line, extractId(line) ?: return@launch)
             if (resp?.success == true) {
                 lastSessionFile = path
+                lastEntryId = null
                 _ui.value = _ui.value.copy(items = emptyList())
                 refreshAll()
             } else {

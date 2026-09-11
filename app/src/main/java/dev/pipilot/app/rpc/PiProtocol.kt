@@ -260,6 +260,24 @@ data class ChatMessage(
     }
 }
 
+// ---------- Session entries ----------
+
+data class PiEntry(
+    val type: String,
+    val id: String,
+    val parentId: String?,
+    val message: JsonObject?,
+) {
+    companion object {
+        fun from(obj: JsonObject): PiEntry = PiEntry(
+            type = obj.str("type") ?: "",
+            id = obj.str("id") ?: "",
+            parentId = obj.str("parentId"),
+            message = obj["message"] as? JsonObject,
+        )
+    }
+}
+
 // ---------- 命令构造 ----------
 
 object PiCommands {
@@ -293,6 +311,12 @@ object PiCommands {
 
     fun switchSession(path: String) =
         named("switch_session", mapOf("sessionPath" to JsonPrimitive(path)))
+
+    fun getEntries(since: String? = null, id: String = nextId()): String = named(
+        "get_entries",
+        if (since != null) mapOf("since" to JsonPrimitive(since)) else emptyMap(),
+        id = id,
+    )
 
     fun setSessionNameReq(name: String) =
         named("set_session_name", mapOf("name" to JsonPrimitive(name)))
