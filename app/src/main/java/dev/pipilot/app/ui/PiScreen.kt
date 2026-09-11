@@ -563,6 +563,10 @@ private fun InputBar(viewModel: PiViewModel, ui: UiState) {
                     android.widget.Toast.makeText(context, "有 ${uris.size - prepared.size} 张图片读取失败,已跳过", android.widget.Toast.LENGTH_SHORT).show()
                 }
             }
+            dev.pipilot.app.log.AppLog.i(
+                "InputBar",
+                "attach OK: ${prepared.size}/${uris.size} img, total ${prepared.sumOf { it.sizeKb }}KB",
+            )
             pendingImagePayloads.addAll(prepared)
             preparing = false
         }
@@ -577,29 +581,36 @@ private fun InputBar(viewModel: PiViewModel, ui: UiState) {
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
                     items(pendingImagePayloads.size) { idx ->
-                        Box {
-                            androidx.compose.foundation.Image(
-                                bitmap = pendingImagePayloads[idx].thumbnail.asImageBitmap(),
-                                contentDescription = "待发送图片 ${idx + 1}",
-                                modifier = Modifier
-                                    .size(64.dp)
-                                    .background(
-                                        MaterialTheme.colorScheme.surfaceVariant,
-                                        RoundedCornerShape(8.dp),
-                                    ),
-                            )
-                            Surface(
-                                shape = androidx.compose.foundation.shape.CircleShape,
-                                color = MaterialTheme.colorScheme.errorContainer,
-                                modifier = Modifier.align(Alignment.TopEnd),
-                            ) {
-                                IconButton(
-                                    onClick = { pendingImagePayloads.removeAt(idx) },
-                                    modifier = Modifier.size(20.dp),
+                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                            Box {
+                                androidx.compose.foundation.Image(
+                                    bitmap = pendingImagePayloads[idx].thumbnail.asImageBitmap(),
+                                    contentDescription = "待发送图片 ${idx + 1}",
+                                    modifier = Modifier
+                                        .size(64.dp)
+                                        .background(
+                                            MaterialTheme.colorScheme.surfaceVariant,
+                                            RoundedCornerShape(8.dp),
+                                        ),
+                                )
+                                Surface(
+                                    shape = androidx.compose.foundation.shape.CircleShape,
+                                    color = MaterialTheme.colorScheme.errorContainer,
+                                    modifier = Modifier.align(Alignment.TopEnd),
                                 ) {
-                                    Icon(Icons.Filled.Close, "移除", tint = MaterialTheme.colorScheme.onErrorContainer, modifier = Modifier.size(14.dp))
+                                    IconButton(
+                                        onClick = { pendingImagePayloads.removeAt(idx) },
+                                        modifier = Modifier.size(20.dp),
+                                    ) {
+                                        Icon(Icons.Filled.Close, "移除", tint = MaterialTheme.colorScheme.onErrorContainer, modifier = Modifier.size(14.dp))
+                                    }
                                 }
                             }
+                            Text(
+                                "${pendingImagePayloads[idx].sizeKb}KB",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
                         }
                     }
                 }
