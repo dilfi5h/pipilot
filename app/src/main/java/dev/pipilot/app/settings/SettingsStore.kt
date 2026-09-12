@@ -1,10 +1,13 @@
 package dev.pipilot.app.settings
 
 import android.content.Context
+import androidx.datastore.preferences.core.emptyPreferences
 import androidx.datastore.preferences.core.edit
+import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.map
 
 private val Context.dataStore by preferencesDataStore(name = "pipilot_settings")
@@ -35,19 +38,23 @@ class SettingsStore(private val context: Context) {
     private val PI_COMMAND = stringPreferencesKey("pi_command")
     private val WORK_DIR = stringPreferencesKey("work_dir")
 
-    val settings: Flow<ConnectionSettings> = context.dataStore.data.map { p ->
-        ConnectionSettings(
-            host = p[HOST] ?: "",
-            port = p[PORT] ?: "22",
-            user = p[USER] ?: "",
-            authType = p[AUTH_TYPE] ?: "password",
-            password = p[PASSWORD] ?: "",
-            privateKey = p[PRIVATE_KEY] ?: "",
-            keyPassphrase = p[KEY_PASSPHRASE] ?: "",
-            piCommand = p[PI_COMMAND] ?: "pi --mode rpc",
-            workDir = p[WORK_DIR] ?: "",
-        )
-    }
+    val settings: Flow<ConnectionSettings> = context.dataStore.data
+        // DataStore 文件损坏(进程写中途被杀等)会让所有收集方直接抛异常→启动闪退;
+        // 这里降级为空配置,app 能起来,用户重填即可
+        .catch { emit(emptyPreferences()) }
+        .map { p ->
+            ConnectionSettings(
+                host = p[HOST] ?: "",
+                port = p[PORT] ?: "22",
+                user = p[USER] ?: "",
+                authType = p[AUTH_TYPE] ?: "password",
+                password = p[PASSWORD] ?: "",
+                privateKey = p[PRIVATE_KEY] ?: "",
+                keyPassphrase = p[KEY_PASSPHRASE] ?: "",
+                piCommand = p[PI_COMMAND] ?: "pi --mode rpc",
+                workDir = p[WORK_DIR] ?: "",
+            )
+        }
 
     suspend fun save(s: ConnectionSettings) {
         context.dataStore.edit { p ->
@@ -64,8 +71,21 @@ class SettingsStore(private val context: Context) {
     }
 
     /** 多主机配置用的底层读写:profiles JSON + 当前选中名。 */
-    internal val profilesPreferences: Flow<androidx.datastore.preferences.core.Preferences> =
-        context.dataStore.data
+    internal val profilesPreferences: Flow<Preferences> =
+        context.dataStore.data.catch { emit(emptyPreferences()) }
+
+    /** 从同一份 Preferences 快照解析老版单配置(供 HostProfiles 免第二次读盘迁移)。 */
+    internal fun legacySettings(p: Preferences): ConnectionSettings = ConnectionSettings(
+        host = p[HOST] ?: "",
+        port = p[PORT] ?: "22",
+        user = p[USER] ?: "",
+        authType = p[AUTH_TYPE] ?: "password",
+        password = p[PASSWORD] ?: "",
+        privateKey = p[PRIVATE_KEY] ?: "",
+        keyPassphrase = p[KEY_PASSPHRASE] ?: "",
+        piCommand = p[PI_COMMAND] ?: "pi --mode rpc",
+        workDir = p[WORK_DIR] ?: "",
+    )
 
     internal suspend fun editProfiles(
         block: (androidx.datastore.preferences.core.MutablePreferences) -> Unit,

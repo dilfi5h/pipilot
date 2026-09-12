@@ -128,26 +128,27 @@ class StreamReducer {
                 sink(ChatItem.BashOutput(command = null, output = delta, running = true))
             }
 
-            "compaction_start" -> sink(ChatItem.SystemNote("正在压缩上下文…", key = "compaction-start"))
+            // 注意 key 必须唯一:LazyColumn 重复 key 会直接崩,系统类提示一律带时间戳
+            "compaction_start" -> sink(ChatItem.SystemNote("正在压缩上下文…", key = "compaction-start-${System.nanoTime()}"))
             "compaction_end" -> {
                 val ok = event.raw["result"] != null
-                sink(ChatItem.SystemNote(if (ok) "上下文压缩完成" else "上下文压缩失败", key = "compaction-end"))
+                sink(ChatItem.SystemNote(if (ok) "上下文压缩完成" else "上下文压缩失败", key = "compaction-end-${System.nanoTime()}"))
             }
             "auto_retry_start" -> sink(
                 ChatItem.SystemNote(
                     "临时错误,自动重试中(第 ${event.raw.intOrNull("attempt")} 次)…",
-                    key = "retry",
+                    key = "retry-${System.nanoTime()}",
                 )
             )
             "auto_retry_end" -> {
                 // 最终失败必须浮出:success=false 带 finalError,否则用户只见"卡住"不知何故
                 if (event.raw.boolOrNull("success") == false) {
                     val err = event.raw.str("finalError") ?: "未知错误"
-                    sink(ChatItem.SystemNote("请求失败(已重试 ${event.raw.intOrNull("attempt") ?: "?"} 次): ${err.take(300)}", key = "retry-final"))
+                    sink(ChatItem.SystemNote("请求失败(已重试 ${event.raw.intOrNull("attempt") ?: "?"} 次): ${err.take(300)}", key = "retry-final-${System.nanoTime()}"))
                 }
             }
             "extension_error" -> sink(
-                ChatItem.SystemNote("扩展错误: ${event.raw.str("error")}", key = "ext-err")
+                ChatItem.SystemNote("扩展错误: ${event.raw.str("error")}", key = "ext-err-${System.nanoTime()}")
             )
         }
     }
@@ -188,7 +189,7 @@ class StreamReducer {
                 text = text.toString(),
                 thinking = thinking.toString().ifEmpty { null },
                 streaming = false,
-                key = "assistant-final-${msg.timestamp ?: System.currentTimeMillis()}",
+                key = "assistant-final-${msg.timestamp ?: System.currentTimeMillis()}-${System.nanoTime()}",
                 timeMs = msg.timestamp ?: System.currentTimeMillis(),
             )
         )

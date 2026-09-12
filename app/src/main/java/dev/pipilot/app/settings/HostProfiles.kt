@@ -4,7 +4,6 @@ import androidx.datastore.preferences.core.stringPreferencesKey
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
-import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.builtins.serializer
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.serializer
@@ -92,10 +91,9 @@ class HostProfileStore(private val store: SettingsStore) {
     val state: Flow<HostProfilesState> = store.profilesPreferences.map { p ->
         var profiles = parseProfiles(p[PROFILE_LIST_KEY])
         if (profiles.isEmpty()) {
-            // 老用户迁移:DataStore 里已有单配置 → default,避免升级丢配置
-            val legacy = runCatching {
-                runBlocking { store.settings.first() }
-            }.getOrNull() ?: ConnectionSettings()
+            // 老用户迁移:同一份快照里的单配置 → default,避免升级丢配置。
+            // (原先在这里 runBlocking 第二次读 DataStore,会在主线程阻塞)
+            val legacy = store.legacySettings(p)
             if (legacy.host.isNotBlank() || legacy.user.isNotBlank() || legacy.privateKey.isNotBlank()) {
                 profiles = listOf(HostProfile("default", legacy))
             }

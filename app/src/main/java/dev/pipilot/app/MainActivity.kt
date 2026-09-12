@@ -11,6 +11,7 @@ import dev.pipilot.app.ui.theme.PiPilotTheme
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        dev.pipilot.app.PipilotApp.consumeLastCrash(filesDir)
         enableEdgeToEdge()
         setContent {
             PiPilotTheme {
