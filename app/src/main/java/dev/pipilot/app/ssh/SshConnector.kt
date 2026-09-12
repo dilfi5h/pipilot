@@ -26,6 +26,8 @@ class SshExecSession(
     val stdout: InputStream,
     val stderr: InputStream,
     val session: Session,
+    /** 远端命令句柄:join() 可等待退出、exitStatus 拿退出码(诊断"命令启动即退")。*/
+    val command: Session.Command,
     private val client: SSHClient,
 ) {
     suspend fun close() = withContext(Dispatchers.IO) {
@@ -86,7 +88,7 @@ object SshConnector {
                 val cmd = session.exec(command)
                 AppLog.i(TAG, "exec started: ${command.take(120)}")
                 Log.d(TAG, "exec started: $command")
-                SshExecSession(cmd.outputStream, cmd.inputStream, cmd.errorStream, session, client)
+                SshExecSession(cmd.outputStream, cmd.inputStream, cmd.errorStream, session, cmd, client)
             } catch (e: Exception) {
                 AppLog.e(TAG, "connect/exec failed: ${e.javaClass.simpleName}: ${e.message}")
                 runCatching { client.disconnect() }

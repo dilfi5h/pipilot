@@ -36,6 +36,8 @@ class PiRpcClient(
     private val stdin: java.io.OutputStream,
     private val stdout: java.io.InputStream,
     private val stderr: java.io.InputStream,
+    /** 阻塞等待远端命令退出并返回退出码;null 表示拿不到(老通道)。用于诊断"命令启动即退"。 */
+    private val remoteExit: (suspend () -> Int?)? = null,
     private val scope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.IO),
 ) {
     sealed interface ConnectionState {
@@ -63,6 +65,7 @@ class PiRpcClient(
     private var writer: BufferedWriter? = null
     private var readerJob: Job? = null
     private var stderrJob: Job? = null
+    private var exitJob: Job? = null
 
     // stderr 尾巴:远端命令退出时的真实原因(shell 报错、pi 崩溃栈)在这里,断连时展示给用户
     private val stderrTail = StringBuilder()
@@ -79,7 +82,14 @@ class PiRpcClient(
 
     /** 标记连接关闭并快速失败所有未决请求;重复调用无害。 */
     private fun markClosed(reason: String?) {
-        if (_connection.value is ConnectionState.Closed) return
+        val cur = _connection.value
+        if (cur is ConnectionState.Closed) {
+            // 已关闭:允许用更具体的原因覆盖通用原因,让用户看到 exit 码和 stderr
+            if (reason != null && (cur.reason == null || cur.reason == "stdout closed")) {
+                _connection.value = ConnectionState.Closed(reason)
+            }
+            return
+        }
         _connection.value = ConnectionState.Closed(reason)
         pending.values.forEach { it.complete(PiResponse(id = null, command = "", success = false, error = reason ?: "connection closed", data = null)) }
         pending.clear()
@@ -89,6 +99,16 @@ class PiRpcClient(
         writer = BufferedWriter(OutputStreamWriter(stdin, Charsets.UTF_8))
         readerJob = scope.launch { readLoop() }
         stderrJob = scope.launch { drainStderr() }
+        exitJob = scope.launch {
+            // 等远端命令退出:pi 正常常驻时永远不返回;启动即退(未安装/崩溃)时在这里拿到真相
+            val code = runCatching { remoteExit?.invoke() }.getOrNull() ?: return@launch
+            kotlinx.coroutines.delay(200) // 等 stderr 尾巴沉淀
+            val tail = stderrTailText()
+            markClosed(
+                if (tail.isNotEmpty()) "远程命令退出(exit=$code): ${tail.take(300)}"
+                else "远程命令退出(exit=$code)",
+            )
+        }
     }
 
     suspend fun close() {
@@ -96,6 +116,7 @@ class PiRpcClient(
         runCatching { stdin.close() }
         readerJob?.cancel()
         stderrJob?.cancel()
+        exitJob?.cancel()
         pending.values.forEach { it.cancel() }
         pending.clear()
     }
@@ -171,7 +192,9 @@ class PiRpcClient(
                 }
             }
             if (sb.isNotEmpty()) handleLine(sb.toString())
-            // stdout 关闭 = 远端命令退出;带上 stderr 尾巴,用户能看到真实原因(如 pi 未安装)
+            // stdout 关闭 = 远端命令退出。稍等一下让 stderr 尾巴和 exit 监听先到,
+            // 这样 Closed 原因能带上真实错误(如 "command not found: pi")而非泛泛的 stdout closed
+            kotlinx.coroutines.delay(400)
             val tail = stderrTailText()
             markClosed(if (tail.isNotEmpty()) "远程命令退出: ${tail.take(300)}" else "stdout closed")
         } catch (e: Exception) {

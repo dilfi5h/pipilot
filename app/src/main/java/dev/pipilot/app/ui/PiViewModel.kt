@@ -116,6 +116,8 @@ class PiViewModel(app: Application) : AndroidViewModel(app) {
     private var connectEpoch = 0
     @Volatile private var userDisconnect = false
     private var reconnectJob: Job? = null
+    /** 最近一次成功建连的时刻;用于识别"连上即退"的启动失败(不进重连循环)。*/
+    private var connectedAtMs = 0L
 
     fun saveSettings(s: ConnectionSettings) {
         viewModelScope.launch { settingsStore.save(s) }
@@ -174,10 +176,18 @@ class PiViewModel(app: Application) : AndroidViewModel(app) {
                 return false
             }
             ssh = exec
-            val rpc = PiRpcClient(exec.stdin, exec.stdout, exec.stderr)
+            val rpc = PiRpcClient(
+                exec.stdin, exec.stdout, exec.stderr,
+                // 阻塞等远端命令退出:pi 常驻时不返回;启动即退(没装 pi 等)时拿到 exit 码做诊断
+                remoteExit = {
+                    runCatching { exec.command.join() }
+                    runCatching { exec.command.exitStatus }.getOrNull()
+                },
+            )
             client = rpc
             rpc.start()
             observeClient(rpc, epoch)
+            connectedAtMs = System.currentTimeMillis()
             // 重连也全量重建:直播消息不推进游标,增量同步会把已上屏的消息重复 append
             if (!resetItems) lastEntryId = null
             _ui.value = _ui.value.copy(
@@ -289,7 +299,22 @@ class PiViewModel(app: Application) : AndroidViewModel(app) {
                         // 断开瞬间旧 client 已不可用,清掉引用后进入重连循环
                         client = null
                         ssh = null
-                        scheduleReconnect(st.reason)
+                        val reason = st.reason
+                        // 连上即退(如远端没装 pi、命令拼错):重连必然同样失败,
+                        // 停止自动重连,把真实原因作为 error 交给用户处理
+                        val fastFatal = reason?.startsWith("远程命令退出") == true &&
+                            System.currentTimeMillis() - connectedAtMs < 10_000
+                        if (fastFatal) {
+                            reconnectJob?.cancel()
+                            AppLog.e(TAG, "remote command exited right after connect; stop reconnect: $reason")
+                            _ui.value = _ui.value.copy(
+                                connected = false, connecting = false,
+                                reconnecting = false, reconnectAttempt = 0, reconnectCountdown = 0,
+                                connectionLabel = "未连接", error = reason,
+                            )
+                        } else {
+                            scheduleReconnect(reason)
+                        }
                     }
                     else -> Unit
                 }
