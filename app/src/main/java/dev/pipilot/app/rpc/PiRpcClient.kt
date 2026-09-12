@@ -64,6 +64,27 @@ class PiRpcClient(
     private var readerJob: Job? = null
     private var stderrJob: Job? = null
 
+    // stderr 尾巴:远端命令退出时的真实原因(shell 报错、pi 崩溃栈)在这里,断连时展示给用户
+    private val stderrTail = StringBuilder()
+
+    private fun noteStderr(text: String) {
+        synchronized(stderrTail) {
+            stderrTail.append(text)
+            if (stderrTail.length > 1500) stderrTail.delete(0, stderrTail.length - 1500)
+        }
+    }
+
+    private fun stderrTailText(): String =
+        synchronized(stderrTail) { stderrTail.toString().trim() }
+
+    /** 标记连接关闭并快速失败所有未决请求;重复调用无害。 */
+    private fun markClosed(reason: String?) {
+        if (_connection.value is ConnectionState.Closed) return
+        _connection.value = ConnectionState.Closed(reason)
+        pending.values.forEach { it.complete(PiResponse(id = null, command = "", success = false, error = reason ?: "connection closed", data = null)) }
+        pending.clear()
+    }
+
     fun start() {
         writer = BufferedWriter(OutputStreamWriter(stdin, Charsets.UTF_8))
         readerJob = scope.launch { readLoop() }
@@ -71,7 +92,7 @@ class PiRpcClient(
     }
 
     suspend fun close() {
-        _connection.value = ConnectionState.Closed(null)
+        markClosed(_connection.value.let { if (it is ConnectionState.Closed) it.reason else null })
         runCatching { stdin.close() }
         readerJob?.cancel()
         stderrJob?.cancel()
@@ -79,14 +100,29 @@ class PiRpcClient(
         pending.clear()
     }
 
-    /** 发送一条命令(已序列化的 JSON 单行)。*/
+    /**
+     * 发送一条命令(已序列化的 JSON 单行)。
+     * 写失败(远端命令退出/通道被关)绝不抛给调用方:调用方多在 viewModelScope 主线程
+     * 协程里,异常会直接杀死进程(闪退)。这里降级为标记 Closed + 快失败未决请求,
+     * 由 VM 的连接状态监听走重连流程,并把 stderr 里的真实原因带给用户。
+     */
     suspend fun sendLine(line: String) = withContext(Dispatchers.IO) {
         writerMutex.withLock {
-            val w = writer ?: throw IllegalStateException("client closed")
-            // 协议要求 LF 结尾;禁用平台换行符(Windows 上 \r\n 会破坏 JSONL)
-            w.write(line)
-            w.write("\n")
-            w.flush()
+            val w = writer ?: return@withLock
+            try {
+                // 协议要求 LF 结尾;禁用平台换行符(Windows 上 \r\n 会破坏 JSONL)
+                w.write(line)
+                w.write("\n")
+                w.flush()
+            } catch (e: Exception) {
+                AppLog.e(TAG, "write failed: ${e.javaClass.simpleName}: ${e.message}; marking closed")
+                val tail = stderrTailText()
+                markClosed(
+                    if (tail.isNotEmpty()) "远程命令退出: ${tail.take(300)}"
+                    else "连接写入失败: ${e.message ?: e.javaClass.simpleName}",
+                )
+                return@withLock
+            }
         }
         Log.d(TAG, ">> ${line.take(200)}")
     }
@@ -135,13 +171,11 @@ class PiRpcClient(
                 }
             }
             if (sb.isNotEmpty()) handleLine(sb.toString())
-            if (_connection.value !is ConnectionState.Closed) {
-                _connection.value = ConnectionState.Closed("stdout closed")
-            }
+            // stdout 关闭 = 远端命令退出;带上 stderr 尾巴,用户能看到真实原因(如 pi 未安装)
+            val tail = stderrTailText()
+            markClosed(if (tail.isNotEmpty()) "远程命令退出: ${tail.take(300)}" else "stdout closed")
         } catch (e: Exception) {
-            if (_connection.value !is ConnectionState.Closed) {
-                _connection.value = ConnectionState.Closed(e.message)
-            }
+            markClosed(e.message)
         }
     }
 
@@ -183,6 +217,7 @@ class PiRpcClient(
                 val n = reader.read(buf)
                 if (n < 0) break
                 val text = String(buf, 0, n)
+                noteStderr(text)
                 Log.w(TAG, "stderr: ${text.take(500)}")
             }
         } catch (_: Exception) {
