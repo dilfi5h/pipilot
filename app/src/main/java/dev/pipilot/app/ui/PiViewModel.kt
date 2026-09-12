@@ -149,7 +149,8 @@ class PiViewModel(app: Application) : AndroidViewModel(app) {
     /**
      * 一次连接尝试。成功返回 true。
      * @param epoch 所属连接代次;重连与手动 connect 各占一代,过期尝试的结果会被丢弃。
-     * @param resetItems 成功后是否清空聊天列表(手动连接清空,重连保留后由 loadHistory 刷新)。
+     * @param resetItems 成功后是否清空聊天列表(手动连接清空,重连也清空后由 loadHistory 全量重建,
+     *   避免增量同步把直播渲染过的消息再 append 一遍)。
      */
     private suspend fun attemptConnect(epoch: Int, resetItems: Boolean = true): Boolean {
         val s = activeSettings.value
@@ -177,11 +178,13 @@ class PiViewModel(app: Application) : AndroidViewModel(app) {
             client = rpc
             rpc.start()
             observeClient(rpc, epoch)
+            // 重连也全量重建:直播消息不推进游标,增量同步会把已上屏的消息重复 append
+            if (!resetItems) lastEntryId = null
             _ui.value = _ui.value.copy(
                 connected = true, connecting = false,
                 reconnecting = false, reconnectAttempt = 0, reconnectCountdown = 0,
                 connectionLabel = "已连接",
-                items = if (resetItems) emptyList() else _ui.value.items,
+                items = emptyList(),
             )
             refreshAll()
             AppLog.i(TAG, "connect ok${if (!resetItems) " (resumed $lastSessionFile)" else ""}")
@@ -499,13 +502,15 @@ class PiViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     private suspend fun loadHistory() {
-        val since = lastEntryId
+        var since = lastEntryId
         val id = PiCommands.nextId()
         var resp = client?.request(PiCommands.getEntries(since, id), id)
-        // 服务端找不到游标时，退回全量同步并重置本地历史。
+        // 服务端找不到游标时,退回全量同步并重置本地历史;since 必须一并置空,
+        // 否则全量快照会 merge 到整个旧列表上,整段对话显示两遍
         if (resp?.success != true && since != null) {
             AppLog.i(TAG, "get_entries since=$since failed; retrying full")
             lastEntryId = null
+            since = null
             val retryId = PiCommands.nextId()
             resp = client?.request(PiCommands.getEntries(id = retryId), retryId)
         }
