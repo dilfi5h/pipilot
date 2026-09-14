@@ -662,19 +662,33 @@ private fun InputBar(viewModel: PiViewModel, ui: UiState) {
 @Composable
 private fun StatusStrip(ui: UiState) {
     val model = ui.state?.model
-    val text = buildString {
+    val left = buildString {
         append(model?.displayName ?: "未选择模型")
         ui.state?.thinkingLevel?.let { append(" · $it") }
-        ui.statsText?.let { append(" · $it") }
     }
-    Text(
-        text = text,
-        style = MaterialTheme.typography.labelSmall,
-        color = MaterialTheme.colorScheme.onSurfaceVariant,
-        maxLines = 1,
-        overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+    // 左:模型/thinking 可缩略;右:tokens/上下文固定宽度始终可见,避免数字一长把上下文挤出屏幕
+    Row(
         modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp),
-    )
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(
+            text = left,
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            maxLines = 1,
+            overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+            modifier = Modifier.weight(1f),
+        )
+        ui.statsText?.let { stats ->
+            Text(
+                text = stats,
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1,
+                modifier = Modifier.padding(start = 8.dp),
+            )
+        }
+    }
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
