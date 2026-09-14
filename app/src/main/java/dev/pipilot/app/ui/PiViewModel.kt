@@ -519,11 +519,19 @@ class PiViewModel(app: Application) : AndroidViewModel(app) {
             append((tokens?.get("total") as? JsonPrimitive)?.contentOrNull ?: "?")
             if (ctx != null) {
                 append(" · 上下文 ")
-                append((ctx["percent"] as? JsonPrimitive)?.contentOrNull ?: "?")
+                append(formatPercent((ctx["percent"] as? JsonPrimitive)?.contentOrNull))
                 append("%")
             }
         }
         _ui.value = _ui.value.copy(statsText = text)
+    }
+
+    /** 上下文百分比最多保留两位小数;整数不带尾零(30 / 12.5 / 12.34)。*/
+    private fun formatPercent(raw: String?): String {
+        if (raw.isNullOrBlank()) return "?"
+        val n = raw.toDoubleOrNull() ?: return raw
+        val s = String.format(java.util.Locale.US, "%.2f", n)
+        return s.trimEnd('0').trimEnd('.')
     }
 
     private suspend fun loadHistory() {
