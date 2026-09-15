@@ -25,8 +25,10 @@ jobs:
           java-version: "17"
 
       - name: Set up Android SDK
-        # v3 默认装已下架的 sdkmanager 'tools' 包会失败;v4 改走 cmdline-tools
+        # 默认 packages 仍含已下架的 'tools';只装 platform-tools,其余交给 AGP
         uses: android-actions/setup-android@v4
+        with:
+          packages: platform-tools
 
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v4
