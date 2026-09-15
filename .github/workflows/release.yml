@@ -25,7 +25,8 @@ jobs:
           java-version: "17"
 
       - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
+        # v3 默认装已下架的 sdkmanager 'tools' 包会失败;v4 改走 cmdline-tools
+        uses: android-actions/setup-android@v4
 
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v4
@@ -51,8 +52,10 @@ jobs:
 
       - name: Rename APK
         run: |
+          # 分支名含 / 时不能直接当文件名(cp 会当成目录);tag 名通常无 /,替换无害
+          SAFE_REF="${GITHUB_REF_NAME//\//-}"
           cp app/build/outputs/apk/debug/app-debug.apk \
-             PiPilot-${GITHUB_REF_NAME}-debug.apk
+             PiPilot-${SAFE_REF}-debug.apk
 
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
