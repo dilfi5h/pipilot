@@ -4,6 +4,8 @@ import android.util.Log
 import dev.pipilot.app.log.AppLog
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import net.schmizz.keepalive.KeepAliveProvider
+import net.schmizz.keepalive.KeepAliveRunner
 import net.schmizz.sshj.DefaultConfig
 import net.schmizz.sshj.SSHClient
 import net.schmizz.sshj.connection.channel.direct.Session
@@ -67,9 +69,17 @@ object SshConnector {
      */
     suspend fun connectAndExec(config: SshConfig, command: String): SshExecSession =
         withContext(Dispatchers.IO) {
-            val client = SSHClient(DefaultConfig())
-            client.timeout = 15_000
-            client.connection.keepAlive.keepAliveInterval = 30
+            // KEEP_ALIVE = OpenSSH keepalive@openssh.com(要回复);默认 HEARTBEAT 只发 IGNORE,NAT/OEM 下不够
+            val sshConfig = DefaultConfig().apply {
+                keepAliveProvider = KeepAliveProvider.KEEP_ALIVE
+            }
+            val client = SSHClient(sshConfig)
+            // 连接阶段超时;长连接本身禁用 SO_TIMEOUT,否则空闲读会在心跳前被掐断
+            client.connectTimeout = 15_000
+            client.timeout = 0
+            // SSH 应用层心跳(秒)。后台保活另靠前台服务+WakeLock/WifiLock,这里防 NAT/空闲断连
+            client.connection.keepAlive.keepAliveInterval = 10
+            (client.connection.keepAlive as? KeepAliveRunner)?.maxAliveCount = 3
             client.addHostKeyVerifier(PromiscuousVerifier())
             try {
                 AppLog.i(TAG, "connect ${config.user}@${config.host}:${config.port}")
@@ -84,6 +94,11 @@ object SshConnector {
                     }
                 }
                 AppLog.i(TAG, "auth ok")
+                val ka = client.connection.keepAlive
+                AppLog.i(
+                    TAG,
+                    "ssh keepalive armed interval=${ka.keepAliveInterval}s provider=${ka.javaClass.simpleName} enabled=${ka.isEnabled}",
+                )
                 val session = client.startSession()
                 val cmd = session.exec(command)
                 AppLog.i(TAG, "exec started: ${command.take(120)}")

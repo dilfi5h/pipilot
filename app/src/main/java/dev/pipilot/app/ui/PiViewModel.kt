@@ -295,11 +295,15 @@ class PiViewModel(app: Application) : AndroidViewModel(app) {
                 when (st) {
                     is PiRpcClient.ConnectionState.Closed -> {
                         // 手动断开不重连:代次已推进、或用户标记了断开、或这是过期连接
-                        if (userDisconnect || epoch != connectEpoch) return@collect
+                        if (userDisconnect || epoch != connectEpoch) {
+                            AppLog.i(TAG, "Closed ignored (userDisconnect=$userDisconnect epoch=$epoch/$connectEpoch): ${st.reason}")
+                            return@collect
+                        }
                         // 断开瞬间旧 client 已不可用,清掉引用后进入重连循环
                         client = null
                         ssh = null
                         val reason = st.reason
+                        AppLog.i(TAG, "connection Closed -> reconnect path: $reason")
                         // 连上即退(如远端没装 pi、命令拼错):重连必然同样失败,
                         // 停止自动重连,把真实原因作为 error 交给用户处理
                         val fastFatal = reason?.startsWith("远程命令退出") == true &&
@@ -455,6 +459,38 @@ class PiViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch { refreshModels() }
         viewModelScope.launch { loadHistory() }
         viewModelScope.launch { refreshStats() }
+    }
+
+    /**
+     * 回前台时主动探活:后台冻结期间 socket 可能已死但 readLoop 要解冻后才报 Closed。
+     * 轻量 get_state;写失败或超时都主动拆连接并 scheduleReconnect,避免 UI 一直显示已连接。
+     * 已在重连中则跳过。
+     */
+    fun onForegroundResume() {
+        val snap = _ui.value
+        if (!snap.connected || snap.reconnecting || snap.connecting || userDisconnect) return
+        val rpc = client ?: return
+        val sshSession = ssh
+        viewModelScope.launch {
+            AppLog.i(TAG, "foreground resume probe get_state")
+            val id = PiCommands.nextId()
+            val resp = rpc.request(PiCommands.named("get_state", id = id), id, timeoutMs = 8_000)
+            if (resp != null) {
+                AppLog.i(TAG, "resume probe ok success=${resp.success}")
+                return@launch
+            }
+            // 8s 等待期间可能已手动断开 / 另开连接 / 已进入重连
+            if (userDisconnect || client !== rpc || !_ui.value.connected) {
+                AppLog.i(TAG, "resume probe TIMEOUT ignored (state changed)")
+                return@launch
+            }
+            AppLog.w(TAG, "resume probe TIMEOUT; forcing reconnect")
+            client = null
+            ssh = null
+            runCatching { rpc.close() }
+            runCatching { sshSession?.close() }
+            scheduleReconnect("后台探活超时")
+        }
     }
 
     private suspend fun refreshState() {
@@ -722,7 +758,8 @@ class PiViewModel(app: Application) : AndroidViewModel(app) {
     fun setSessionName(name: String) {
         viewModelScope.launch {
             val id = PiCommands.nextId()
-            val resp = client?.request(PiCommands.setSessionNameReq(name), id)
+            // 必须把同一个 id 写进请求体;否则 waiter 等 A、服务端回 B → UNMATCHED + 假 TIMEOUT
+            val resp = client?.request(PiCommands.setSessionNameReq(name, id = id), id)
             if (resp?.success == true) {
                 _ui.value = _ui.value.copy(state = _ui.value.state?.copy(sessionName = name.ifBlank { null }))
             } else {
@@ -768,6 +805,12 @@ class PiViewModel(app: Application) : AndroidViewModel(app) {
         connectEpoch++
         userDisconnect = true
         reconnectJob?.cancel()
+        // Activity 真正销毁时关掉套接字,避免 SSH/RPC 泄漏到进程退出
+        runCatching {
+            kotlinx.coroutines.runBlocking {
+                closeResources()
+            }
+        }
         super.onCleared()
     }
 }

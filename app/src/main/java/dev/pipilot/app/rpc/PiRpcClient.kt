@@ -86,10 +86,12 @@ class PiRpcClient(
         if (cur is ConnectionState.Closed) {
             // 已关闭:允许用更具体的原因覆盖通用原因,让用户看到 exit 码和 stderr
             if (reason != null && (cur.reason == null || cur.reason == "stdout closed")) {
+                AppLog.i(TAG, "Closed reason upgraded: ${cur.reason} -> $reason")
                 _connection.value = ConnectionState.Closed(reason)
             }
             return
         }
+        AppLog.i(TAG, "markClosed: $reason")
         _connection.value = ConnectionState.Closed(reason)
         pending.values.forEach { it.complete(PiResponse(id = null, command = "", success = false, error = reason ?: "connection closed", data = null)) }
         pending.clear()
@@ -198,7 +200,8 @@ class PiRpcClient(
             val tail = stderrTailText()
             markClosed(if (tail.isNotEmpty()) "远程命令退出: ${tail.take(300)}" else "stdout closed")
         } catch (e: Exception) {
-            markClosed(e.message)
+            AppLog.e(TAG, "readLoop failed: ${e.javaClass.simpleName}: ${e.message}")
+            markClosed("${e.javaClass.simpleName}: ${e.message}")
         }
     }
 

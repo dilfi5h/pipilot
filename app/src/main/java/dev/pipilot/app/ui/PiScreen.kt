@@ -65,7 +65,15 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
+import android.content.Intent
+import android.net.Uri
+import android.os.Build
+import android.os.PowerManager
+import android.provider.Settings
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -80,12 +88,18 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
 import dev.pipilot.app.chat.ChatItem
 import dev.pipilot.app.chat.MarkdownText
+import dev.pipilot.app.keepalive.ConnectionKeepAliveService
+import dev.pipilot.app.log.AppLog
 import dev.pipilot.app.rpc.PiModel
 import dev.pipilot.app.settings.ConnectionSettings
 import kotlinx.coroutines.launch
@@ -98,6 +112,90 @@ fun PiScreen(viewModel: PiViewModel) {
     val snackbar = remember { SnackbarHostState() }
     var showSettings by remember { mutableStateOf(false) }
     var showSessions by remember { mutableStateOf(false) }
+    val context = LocalContext.current
+    val lifecycleOwner = LocalLifecycleOwner.current
+    // pausedOrStopped: ON_PAUSE 起就算离开前台,比 ON_STOP 更早启保活
+    var pausedOrStopped by remember { mutableStateOf(false) }
+    var notifDeniedHinted by rememberSaveable { mutableStateOf(false) }
+    var batteryPrompted by rememberSaveable { mutableStateOf(false) }
+
+    val scope = rememberCoroutineScope()
+    val notifPermissionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission(),
+    ) { granted ->
+        AppLog.i("KeepAlive", "POST_NOTIFICATIONS granted=$granted")
+        if (!granted && !notifDeniedHinted) {
+            notifDeniedHinted = true
+            // 拒绝后不启 FGS;仍可依赖心跳 + 回前台重连
+            scope.launch {
+                snackbar.showSnackbar("未开通知权限：切后台可能很快断线，回前台会自动重连")
+            }
+        }
+        // 通知权限对话框结束后再申请电池豁免,避免抢跑 ON_PAUSE 导致首次 FGS 被跳过
+        if (!batteryPrompted) {
+            batteryPrompted = true
+            maybeRequestIgnoreBatteryOptimizations(context)
+        }
+    }
+
+    val needsKeepAlive = ui.connected || ui.reconnecting || ui.connecting
+    // observer 闭包读最新值,避免 ON_PAUSE 拿到过期的 connected
+    val needsKeepAliveRef = remember { mutableStateOf(needsKeepAlive) }
+    needsKeepAliveRef.value = needsKeepAlive
+
+    // 连上后先要通知权限;电池优化弹窗延后到权限结果回调(或已有权限时再请求)
+    LaunchedEffect(ui.connected) {
+        if (!ui.connected) return@LaunchedEffect
+        if (Build.VERSION.SDK_INT >= 33 && !ConnectionKeepAliveService.canPostNotifications(context)) {
+            notifPermissionLauncher.launch(android.Manifest.permission.POST_NOTIFICATIONS)
+            return@LaunchedEffect
+        }
+        if (!batteryPrompted) {
+            batteryPrompted = true
+            maybeRequestIgnoreBatteryOptimizations(context)
+        }
+    }
+
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            when (event) {
+                Lifecycle.Event.ON_PAUSE -> {
+                    pausedOrStopped = true
+                    AppLog.i("KeepAlive", "app pause needsKeepAlive=${needsKeepAliveRef.value}")
+                    // 同步抢跑启 FGS,赶在系统冻网前;未连接则不启
+                    if (needsKeepAliveRef.value && ConnectionKeepAliveService.canPostNotifications(context)) {
+                        ConnectionKeepAliveService.start(context)
+                    }
+                }
+                Lifecycle.Event.ON_STOP -> {
+                    pausedOrStopped = true
+                    AppLog.i("KeepAlive", "app stop")
+                }
+                Lifecycle.Event.ON_START -> {
+                    pausedOrStopped = false
+                    AppLog.i("KeepAlive", "app start/foreground")
+                    viewModel.onForegroundResume()
+                }
+                else -> Unit
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
+
+    // 需要保活且已离开前台 → 启;回到前台或彻底断开 → 停
+    // 重连过程中也保持 FGS,避免"断了→停服务→更难连上"的抖动
+    LaunchedEffect(needsKeepAlive, pausedOrStopped) {
+        if (needsKeepAlive && pausedOrStopped) {
+            if (ConnectionKeepAliveService.canPostNotifications(context)) {
+                ConnectionKeepAliveService.start(context)
+            } else {
+                AppLog.i("KeepAlive", "skip FGS: notification permission missing")
+            }
+        } else if (!needsKeepAlive || !pausedOrStopped) {
+            ConnectionKeepAliveService.stop(context)
+        }
+    }
     var showRename by remember { mutableStateOf(false) }
 
     LaunchedEffect(ui.error) {
@@ -1000,4 +1098,25 @@ private fun ExtensionDialog(d: UiDialog, onAnswer: (DialogAnswer) -> Unit) {
             TextButton(onClick = { onAnswer(DialogAnswer.Cancel) }) { Text("取消") }
         },
     )
+}
+
+/** 连上后请求忽略电池优化;OEM 不豁免时后台网络常被冻死。失败只记日志,不影响主流程。 */
+private fun maybeRequestIgnoreBatteryOptimizations(context: android.content.Context) {
+    if (Build.VERSION.SDK_INT < 23) return
+    val pm = context.getSystemService(PowerManager::class.java) ?: return
+    val pkg = context.packageName
+    if (pm.isIgnoringBatteryOptimizations(pkg)) {
+        AppLog.i("KeepAlive", "already ignoring battery optimizations")
+        return
+    }
+    try {
+        val intent = Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS).apply {
+            data = Uri.parse("package:$pkg")
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        }
+        context.startActivity(intent)
+        AppLog.i("KeepAlive", "requested IGNORE_BATTERY_OPTIMIZATIONS")
+    } catch (e: Exception) {
+        AppLog.e("KeepAlive", "battery opt request failed: ${e.javaClass.simpleName}: ${e.message}")
+    }
 }

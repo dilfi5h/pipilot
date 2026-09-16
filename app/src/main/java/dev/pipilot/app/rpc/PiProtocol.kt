@@ -335,8 +335,8 @@ object PiCommands {
         id = id,
     )
 
-    fun setSessionNameReq(name: String) =
-        named("set_session_name", mapOf("name" to JsonPrimitive(name)))
+    fun setSessionNameReq(name: String, id: String = nextId()): String =
+        named("set_session_name", mapOf("name" to JsonPrimitive(name)), id = id)
 
     fun uiResponseValue(id: String, value: String): String =
         JsonObject(mapOf("type" to JsonPrimitive("extension_ui_response"), "id" to JsonPrimitive(id), "value" to JsonPrimitive(value))).toString()
