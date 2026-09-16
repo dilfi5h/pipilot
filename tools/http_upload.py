@@ -6,7 +6,7 @@ import urllib.parse
 import urllib.request
 import uuid
 
-def upload(host, path, password="Lannister33", use_proxy=False):
+def upload(host, path, password, use_proxy=False):
     handlers = []
     if use_proxy:
         handlers.append(urllib.request.ProxyHandler({
@@ -45,6 +45,8 @@ def upload(host, path, password="Lannister33", use_proxy=False):
     print("URL:", out)
 
 if __name__ == "__main__":
-    host, path = sys.argv[1], sys.argv[2]
-    use_proxy = len(sys.argv) > 3 and sys.argv[3] == "proxy"
-    upload(host, path, use_proxy=use_proxy)
+    if len(sys.argv) < 4:
+        sys.exit("usage: http_upload.py HOST PATH PASSWORD [proxy]")
+    host, path, password = sys.argv[1], sys.argv[2], sys.argv[3]
+    use_proxy = len(sys.argv) > 4 and sys.argv[4] == "proxy"
+    upload(host, path, password, use_proxy=use_proxy)

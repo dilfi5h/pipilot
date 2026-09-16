@@ -30,6 +30,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
@@ -92,6 +93,8 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.Lifecycle
@@ -183,6 +186,7 @@ fun PiScreen(viewModel: PiViewModel) {
             when (event) {
                 Lifecycle.Event.ON_PAUSE -> {
                     pausedOrStopped = true
+                    viewModel.setBackgrounded(true)
                     AppLog.i("KeepAlive", "app pause needsKeepAlive=${needsKeepAliveRef.value}")
                     // 同步抢跑启 FGS,赶在系统冻网前;未连接则不启
                     if (needsKeepAliveRef.value && ConnectionKeepAliveService.canPostNotifications(context)) {
@@ -195,6 +199,7 @@ fun PiScreen(viewModel: PiViewModel) {
                 }
                 Lifecycle.Event.ON_START -> {
                     pausedOrStopped = false
+                    viewModel.setBackgrounded(false)
                     AppLog.i("KeepAlive", "app start/foreground")
                     viewModel.onForegroundResume()
                 }
@@ -241,7 +246,7 @@ fun PiScreen(viewModel: PiViewModel) {
                     },
                     colors = TopAppBarDefaults.topAppBarColors(containerColor = MaterialTheme.colorScheme.surface),
                     actions = {
-                        if (ui.connected) {
+                        if (ui.connected || ui.reconnecting) {
                             ModelPicker(viewModel, ui)
                             ThinkingPicker(viewModel, ui)
                             IconButton(onClick = { viewModel.listSessions(); showSessions = true }) {
@@ -257,7 +262,7 @@ fun PiScreen(viewModel: PiViewModel) {
                     },
                 )
                 // 会话名独立成一行:独占整行宽度,不再跟右上角图标抢地方;点击可重命名
-                if (ui.connected) {
+                if (ui.connected || ui.reconnecting) {
                     Surface(color = MaterialTheme.colorScheme.surface) {
                         Text(
                             text = sessionLabel(ui),
@@ -277,7 +282,8 @@ fun PiScreen(viewModel: PiViewModel) {
         bottomBar = { if (ui.connected) InputBar(viewModel, ui) },
     ) { padding ->
         Column(Modifier.padding(padding).fillMaxSize()) {
-            if (!ui.connected) {
+            // 重连时保留聊天+横幅;只有从未连上(或用户取消)才回到空连接页
+            if (!ui.connected && !ui.reconnecting) {
                 NotConnectedView(ui, settings, viewModel)
             } else {
                 if (ui.reconnecting) {
@@ -678,17 +684,17 @@ private fun InputBar(viewModel: PiViewModel, ui: UiState) {
                     .onFailure { dev.pipilot.app.log.AppLog.e("InputBar", "prepareImage failed: ${it.javaClass.simpleName}: ${it.message}") }
                     .getOrNull()
             }
-            if (prepared.size < uris.size) {
-                kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
+            kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
+                if (prepared.size < uris.size) {
                     android.widget.Toast.makeText(context, "有 ${uris.size - prepared.size} 张图片读取失败,已跳过", android.widget.Toast.LENGTH_SHORT).show()
                 }
+                pendingImagePayloads.addAll(prepared)
+                preparing = false
             }
             dev.pipilot.app.log.AppLog.i(
                 "InputBar",
                 "attach OK: ${prepared.size}/${uris.size} img, total ${prepared.sumOf { it.sizeKb }}KB",
             )
-            pendingImagePayloads.addAll(prepared)
-            preparing = false
         }
     }
     Surface(tonalElevation = 3.dp) {
@@ -888,6 +894,8 @@ private fun SettingsSheet(settings: ConnectionSettings, viewModel: PiViewModel, 
                 OutlinedTextField(
                     value = draft.password, onValueChange = { draft = draft.copy(password = it) },
                     label = { Text("密码") }, modifier = Modifier.fillMaxWidth(), singleLine = true,
+                    visualTransformation = PasswordVisualTransformation(),
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
                 )
             } else {
                 OutlinedTextField(
@@ -898,6 +906,8 @@ private fun SettingsSheet(settings: ConnectionSettings, viewModel: PiViewModel, 
                 OutlinedTextField(
                     value = draft.keyPassphrase, onValueChange = { draft = draft.copy(keyPassphrase = it) },
                     label = { Text("私钥口令(可选)") }, modifier = Modifier.fillMaxWidth(), singleLine = true,
+                    visualTransformation = PasswordVisualTransformation(),
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
                 )
             }
             Spacer(Modifier.size(12.dp))

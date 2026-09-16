@@ -4,7 +4,6 @@ import androidx.datastore.preferences.core.stringPreferencesKey
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
-import kotlinx.serialization.builtins.serializer
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.serializer
 import kotlinx.serialization.json.JsonArray
@@ -38,7 +37,7 @@ private val ACTIVE_PROFILE_KEY = stringPreferencesKey("host_profile_active")
 private fun quote(s: String): String =
     profilesJson.encodeToString(serializer<String>(), s)
 
-private fun parseProfiles(raw: String?): List<HostProfile> {
+internal fun parseProfiles(raw: String?): List<HostProfile> {
     if (raw.isNullOrBlank()) return emptyList()
     return runCatching {
         val arr = profilesJson.parseToJsonElement(raw) as? JsonArray ?: return emptyList()
@@ -64,7 +63,7 @@ private fun parseProfiles(raw: String?): List<HostProfile> {
     }.getOrElse { emptyList() }
 }
 
-private fun serializeProfiles(profiles: List<HostProfile>): String {
+internal fun serializeProfiles(profiles: List<HostProfile>): String {
     val arr = profiles.map { p ->
         buildString {
             append("{")

@@ -48,7 +48,10 @@ gradle assembleDebug   # 或 ./gradlew 若仓库含 wrapper
   bash/read/write 等工具的参数与累计输出;直接 `bash` 命令输出也有终端风格卡片
 - **模型切换**:get_available_models 列表 + set_model;thinking level 调节(set_thinking_level)
 - **会话管理**:新建会话(new_session)、列出远端 `~/.pi/agent/sessions/*.jsonl` 并切换
-  (switch_session)、加载历史(get_messages)、会话统计(get_session_stats:tokens/上下文占用)
+  (switch_session)、加载历史(get_entries)、会话统计(get_session_stats:tokens/上下文占用)
+- **图片附件**:输入框选图,压缩为 JPEG 后随 prompt.images 发送
+- **多主机配置**:设置页保存/切换命名主机
+- **后台保活**:切后台约 10 分钟 FGS + WakeLock/WifiLock;应用级 get_state 心跳(后台 20s / 前台 60s);断线指数退避重连,并用 `--session` 恢复原会话
 - **扩展 UI 桥接**:pi 扩展弹出的 select/confirm/input 对话框(extension_ui_request)
   映射为 Android 原生 AlertDialog,回答通过 extension_ui_response 回传
 
@@ -83,9 +86,12 @@ TUI 专属命令(如 `/settings`)在 RPC 模式下不生效。
 
 ## 已知限制 / Roadmap
 
+- [x] 图片附件(prompt 的 images 字段)
+- [x] 多主机配置
+- [x] 通知栏短时保活 + 断线自动重连
+- [x] `get_entries` 历史同步(重连全量重建,避免直播消息重复)
 - [ ] 流式中 turn 结束后 `live` 气泡与最终气泡的去重细调
-- [ ] 会话树(/tree)、fork/clone、get_entries 增量游标
-- [ ] 图片附件(prompt 的 images 字段)
+- [ ] 会话树(/tree)、fork/clone
 - [ ] export_html 并在手机上预览
-- [ ] Host key 固定、SSH agent 转发、多主机配置
-- [ ] 通知栏保活 / 断线自动重连
+- [ ] Host key 固定(FingerprintVerifier)、SSH agent 转发
+- [ ] 凭据加密存储(当前 DataStore 明文,仅 `allowBackup=false`)

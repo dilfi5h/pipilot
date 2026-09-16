@@ -1,6 +1,5 @@
 package dev.pipilot.app.ssh
 
-import android.util.Log
 import dev.pipilot.app.log.AppLog
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -112,7 +111,6 @@ object SshConnector {
                 val session = client.startSession()
                 val cmd = session.exec(command)
                 AppLog.i(TAG, "exec started: ${command.take(120)}")
-                Log.d(TAG, "exec started: $command")
                 SshExecSession(cmd.outputStream, cmd.inputStream, cmd.errorStream, session, cmd, client)
             } catch (e: Exception) {
                 AppLog.e(TAG, "connect/exec failed: ${e.javaClass.simpleName}: ${e.message}")

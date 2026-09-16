@@ -45,7 +45,10 @@ object AppLog {
     @Synchronized
     fun init(dir: File) {
         runCatching {
-            val f = File(dir, FILE_NAME)
+            val logDir = File(dir, "logs").apply { mkdirs() }
+            val f = File(logDir, FILE_NAME)
+            val legacy = File(dir, FILE_NAME)
+            if (!f.exists() && legacy.exists()) legacy.renameTo(f)
             file = f
             fileBytes = f.length()
             fsyncFmt = SimpleDateFormat("MM-dd HH:mm:ss.SSS", Locale.US)

@@ -74,9 +74,6 @@ class StreamReducer {
                     }
                     "toolcall_end" -> {
                         val id = d.toolCallId ?: return
-                        // toolcall_end 里 contentIndex 对应的完整 toolCall 在 raw.assistantMessageEvent.toolCall
-                        val tc = event.raw["assistantMessageEvent"]?.let { it::class.simpleName; null }
-                        // 保底:用已累计的参数
                         liveToolCalls[id]?.let { live ->
                             emitToolCard(sink, live.id, live.name, live.args.toString(), output = null, running = true)
                         }
@@ -125,7 +122,8 @@ class StreamReducer {
 
             "bash_execution_update" -> {
                 val delta = event.raw.str("delta") ?: return
-                sink(ChatItem.BashOutput(command = null, output = delta, running = true))
+                val id = event.raw.str("id") ?: "direct"
+                sink(ChatItem.BashOutput(command = null, output = delta, running = true, key = "bash-$id"))
             }
 
             // 注意 key 必须唯一:LazyColumn 重复 key 会直接崩,系统类提示一律带时间戳

@@ -1,11 +1,11 @@
 package dev.pipilot.app.rpc
 
-import android.util.Log
 import dev.pipilot.app.log.AppLog
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -67,8 +67,11 @@ class PiRpcClient(
      * 被拖住,但事件仍在流 → 有下行就等于链路活着,避免误判重连把正在跑的 agent 掐死。
      */
     @Volatile
-    private var lastInboundAt = 0L
+    private var lastInboundAt = System.currentTimeMillis()
     val lastInboundAtMs: Long get() = lastInboundAt
+    /** 本地拆除时置位,避免 close() 再发 Closed 把 VM 推进第二轮重连。*/
+    @Volatile
+    private var suppressClosedNotify = false
 
     private val writerMutex = Mutex()
     private var writer: BufferedWriter? = null
@@ -94,16 +97,20 @@ class PiRpcClient(
         val cur = _connection.value
         if (cur is ConnectionState.Closed) {
             // 已关闭:允许用更具体的原因覆盖通用原因,让用户看到 exit 码和 stderr
-            if (reason != null && (cur.reason == null || cur.reason == "stdout closed")) {
+            if (reason != null && (cur.reason == null || cur.reason == "stdout closed") && !suppressClosedNotify) {
                 AppLog.i(TAG, "Closed reason upgraded: ${cur.reason} -> $reason")
                 _connection.value = ConnectionState.Closed(reason)
             }
             return
         }
-        AppLog.i(TAG, "markClosed: $reason")
-        _connection.value = ConnectionState.Closed(reason)
         pending.values.forEach { it.complete(PiResponse(id = null, command = "", success = false, error = reason ?: "connection closed", data = null)) }
         pending.clear()
+        if (suppressClosedNotify) {
+            AppLog.i(TAG, "markClosed suppressed (local teardown): $reason")
+            return
+        }
+        AppLog.i(TAG, "markClosed: $reason")
+        _connection.value = ConnectionState.Closed(reason)
     }
 
     fun start() {
@@ -122,14 +129,22 @@ class PiRpcClient(
         }
     }
 
-    suspend fun close() {
-        markClosed(_connection.value.let { if (it is ConnectionState.Closed) it.reason else null })
+    /**
+     * @param notify 为 false 时只拆通道、不发 Closed。VM 本地拆除(forceReconnect /
+     *   closeResources)已经自己进重连,再发 Closed 会叠第二轮循环。
+     */
+    suspend fun close(notify: Boolean = true) {
+        if (!notify) suppressClosedNotify = true
+        markClosed(
+            _connection.value.let { if (it is ConnectionState.Closed) it.reason else "closed locally" },
+        )
         runCatching { stdin.close() }
         readerJob?.cancel()
         stderrJob?.cancel()
         exitJob?.cancel()
         pending.values.forEach { it.cancel() }
         pending.clear()
+        scope.cancel()
     }
 
     /**
@@ -156,7 +171,7 @@ class PiRpcClient(
                 return@withLock
             }
         }
-        Log.d(TAG, ">> ${line.take(200)}")
+        AppLog.d(TAG, ">> ${AppLog.redactCommand(line)}")
     }
 
     /** 发送命令并等待对应 response(按 id 关联)。超时返回 null。*/
@@ -221,13 +236,12 @@ class PiRpcClient(
     private suspend fun handleLine(rawLine: String) {
         val line = rawLine.removeSuffix("\r")
         if (line.isBlank()) return
-        Log.d(TAG, "<< ${line.take(200)}")
+        AppLog.d(TAG, "<< ${AppLog.redactCommand(line)}")
         _lines.emit(line)
         val parsed = try {
             parseLine(line)
         } catch (e: Exception) {
             AppLog.w(TAG, "<< BAD JSON line (${line.length} chars): ${e.message} head=${line.take(120)}")
-            Log.w(TAG, "bad json line: ${e.message}")
             return
         }
         when (parsed) {
@@ -258,7 +272,7 @@ class PiRpcClient(
                 lastInboundAt = System.currentTimeMillis()
                 val text = String(buf, 0, n)
                 noteStderr(text)
-                Log.w(TAG, "stderr: ${text.take(500)}")
+                AppLog.w(TAG, "stderr: ${text.take(500)}")
             }
         } catch (_: Exception) {
         }

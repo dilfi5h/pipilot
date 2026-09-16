@@ -135,16 +135,18 @@ PiPilot 把它映射成原生 `AlertDialog`(`PiViewModel` 拦截该事件转成
   `pi --mode rpc`;stderr 持续 drain 并打日志(避免缓冲区塞死阻塞 pi)。
 - host key 校验目前是 `PromiscuousVerifier`(信任所有)。个人内网可接受;
   公网使用建议加 fingerprint 固定(见 Roadmap)。
-- 会话列表不走 RPC,直接 `runQuick` 执行
-  `ls -t ~/.pi/agent/sessions/*.jsonl | head -30`(按修改时间排序),
-  再用 `switch_session` 加载。
+- 会话列表不走 RPC,直接 `runQuick` 执行可移植 `find`+`stat` 脚本,
+  按 mtime 排序后取最近 30 个,再用 `switch_session` 加载。
 
 ## 5. 状态与生命周期
 
 - 单一 `UiState`(StateFlow)驱动全 UI;`PiViewModel` 持有 ssh 会话和 rpc
   client,ViewModel 销毁时断开通道。
-- 断线(stdout EOF / IO 异常)→ `ConnectionState.Closed(reason)` → UI 显示
-  断开原因,不清聊天内容(重连后 `get_messages` 恢复)。
+- 断线(stdout EOF / IO 异常 / 心跳超时 / 网络丢失)→ 立刻拆掉旧 SSH,
+  指数退避重连(2s→30s)。重连期间 UI 保留聊天列表 + 横幅,成功后用
+  `pi --mode rpc --session <path>` 恢复,并以 `get_entries` 全量重建历史。
+- 后台:ON_PAUSE 启 10 分钟 FGS(WakeLock+WifiLock),心跳加密到 20s;
+  进程被杀后 FGS 不 sticky 复活(连接在 ViewModel 里,空服务没有 SSH)。
 - RPC 进程随 SSH 通道生灭:断开即远端 pi 退出。会话文件持久化在远端,
   重连可无损恢复,这是选择"无状态连接 + 远端 session 文件"的原因。
 
@@ -152,7 +154,8 @@ PiPilot 把它映射成原生 `AlertDialog`(`PiViewModel` 拦截该事件转成
 
 - 凭据(密码/PEM/口令)存于 app 私有 Datastore,`allowBackup=false`,
   不出设备。
-- 密码字段、错误信息中的主机细节均不在日志打印。
+- 密码字段不在 RPC 日志打印(命令走 `AppLog.redactCommand`);连接日志仍含
+  `user@host:port`(排障需要),不含密码/PEM。
 - 已知妥协:PromiscuousVerifier(见 §4)。改进路径:设置页粘贴
   `sha256:<fingerprint>`,sshj 的 `FingerprintVerifier` 一行可换。
 
@@ -167,10 +170,11 @@ softprops/action-gh-release 附到 GitHub Release,release notes 自动生成。
 
 ## 8. Roadmap
 
+- [x] 断线自动重连 + 指数退避
+- [x] `get_entries` 历史同步(重连全量重建)
+- [x] 图片附件(`prompt.images`,ImageContent base64)
+- [x] 通知栏短时保活(10 分钟 FGS) / 多主机配置
 - [ ] host key 指纹固定(FingerprintVerifier + 设置页)
-- [ ] 断线自动重连 + 指数退避
 - [ ] 会话树:`get_tree`/`get_fork_messages`/`fork`/`clone`(对应 TUI /tree)
-- [ ] `get_entries` + `since` 游标做增量历史同步
-- [ ] 图片附件(`prompt.images`,ImageContent base64)
 - [ ] `export_html` + 手机端预览
-- [ ] 通知栏常驻保活 / 多主机配置 / release 签名构建
+- [ ] 凭据加密存储 / release 签名构建走 CI

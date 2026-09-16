@@ -47,7 +47,13 @@ class ConnectionKeepAliveService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        if (intent?.action == ACTION_STOP) {
+        if (intent == null) {
+            // START_STICKY 进程死后会用 null intent 拉起服务;SSH 在 ViewModel 里,这里只剩空通知
+            AppLog.w(TAG, "null intent sticky restart; no SSH in service, stopping")
+            stopSelf()
+            return START_NOT_STICKY
+        }
+        if (intent.action == ACTION_STOP) {
             AppLog.i(TAG, "stop requested")
             stopSelf()
             return START_NOT_STICKY
@@ -73,7 +79,7 @@ class ConnectionKeepAliveService : Service() {
             TAG,
             "FGS started; wakeLock=${wakeLock?.isHeld == true}; wifiLock=${wifiLock?.isHeld == true}; auto-stop in ${KEEP_ALIVE_MS / 60_000}min",
         )
-        return START_STICKY
+        return START_NOT_STICKY
     }
 
     override fun onDestroy() {

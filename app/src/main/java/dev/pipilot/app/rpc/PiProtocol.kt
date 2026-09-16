@@ -282,8 +282,8 @@ data class PiEntry(
 // ---------- 命令构造 ----------
 
 object PiCommands {
-    var counter = 0
-    fun nextId(): String = "app-${System.currentTimeMillis()}-${counter++}"
+    private val counter = java.util.concurrent.atomic.AtomicInteger(0)
+    fun nextId(): String = "app-${System.currentTimeMillis()}-${counter.getAndIncrement()}"
 
     fun prompt(
         message: String,

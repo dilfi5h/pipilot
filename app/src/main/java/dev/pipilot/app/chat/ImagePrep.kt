@@ -64,12 +64,16 @@ fun prepareImageForUpload(context: Context, uri: Uri, maxSide: Int = 1568): Prep
         }
         // 输入框预览用的小缩略图(约 128px)
         val thumbScale = maxOf(1, maxOf(bitmap.width, bitmap.height) / 128)
-        val thumbnail = android.graphics.Bitmap.createScaledBitmap(
+        val scaled = android.graphics.Bitmap.createScaledBitmap(
             bitmap,
             (bitmap.width / thumbScale).coerceAtLeast(1),
             (bitmap.height / thumbScale).coerceAtLeast(1),
             true,
         )
+        // createScaledBitmap 在已足够小时可能返回原图;后面要 recycle 原图,必须拷一份给缩略图
+        val thumbnail = if (scaled === bitmap) {
+            bitmap.copy(bitmap.config ?: android.graphics.Bitmap.Config.ARGB_8888, false) ?: scaled
+        } else scaled
         AppLog.i(TAG, "prepared ${bounds.outWidth}x${bounds.outHeight} ${bounds.outMimeType} -> ${ok.size / 1024}KB jpeg")
         PreparedImage(
             base64 = Base64.encodeToString(ok, Base64.NO_WRAP),
