@@ -117,7 +117,7 @@ fun PiScreen(viewModel: PiViewModel) {
     // pausedOrStopped: ON_PAUSE 起就算离开前台,比 ON_STOP 更早启保活
     var pausedOrStopped by remember { mutableStateOf(false) }
     var notifDeniedHinted by rememberSaveable { mutableStateOf(false) }
-    var batteryPrompted by rememberSaveable { mutableStateOf(false) }
+    var showBatteryHint by rememberSaveable { mutableStateOf(false) }
 
     val scope = rememberCoroutineScope()
     val notifPermissionLauncher = rememberLauncherForActivityResult(
@@ -131,11 +131,6 @@ fun PiScreen(viewModel: PiViewModel) {
                 snackbar.showSnackbar("未开通知权限：切后台可能很快断线，回前台会自动重连")
             }
         }
-        // 通知权限对话框结束后再申请电池豁免,避免抢跑 ON_PAUSE 导致首次 FGS 被跳过
-        if (!batteryPrompted) {
-            batteryPrompted = true
-            maybeRequestIgnoreBatteryOptimizations(context)
-        }
     }
 
     val needsKeepAlive = ui.connected || ui.reconnecting || ui.connecting
@@ -143,17 +138,44 @@ fun PiScreen(viewModel: PiViewModel) {
     val needsKeepAliveRef = remember { mutableStateOf(needsKeepAlive) }
     needsKeepAliveRef.value = needsKeepAlive
 
-    // 连上后先要通知权限;电池优化弹窗延后到权限结果回调(或已有权限时再请求)
+    // 连上后只在需要时申请通知权限;「忽略电池优化」用 App 内对话框引导一次(不直接弹系统页)
     LaunchedEffect(ui.connected) {
         if (!ui.connected) return@LaunchedEffect
         if (Build.VERSION.SDK_INT >= 33 && !ConnectionKeepAliveService.canPostNotifications(context)) {
             notifPermissionLauncher.launch(android.Manifest.permission.POST_NOTIFICATIONS)
-            return@LaunchedEffect
         }
-        if (!batteryPrompted) {
-            batteryPrompted = true
-            maybeRequestIgnoreBatteryOptimizations(context)
+        // vivo/小米/OPPO 等机型切后台会冻结网络,忽略电池优化基本是保活的前提;只引导一次,可拒绝
+        if (!isIgnoringBatteryOptimizations(context) && !dev.pipilot.app.PipilotApp.batteryPromptShown(context.filesDir)) {
+            showBatteryHint = true
         }
+    }
+
+    if (showBatteryHint) {
+        AlertDialog(
+            onDismissRequest = { showBatteryHint = false },
+            title = { Text("后台保活需要一项授权") },
+            text = {
+                Text(
+                    "这台机型在切到后台后会冻结应用网络,只有前台服务+心跳保不住 SSH 连接。\n\n" +
+                        "建议允许 PiPilot「忽略电池优化」;更彻底的做法是在系统设置里再打开" +
+                        "「自启动/关联启动」和电池的「允许后台运行」。\n\n" +
+                        "不授权也能用,只是切后台容易断线,回前台会自动重连。",
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    dev.pipilot.app.PipilotApp.markBatteryPromptShown(context.filesDir)
+                    showBatteryHint = false
+                    maybeRequestIgnoreBatteryOptimizations(context)
+                }) { Text("去授权") }
+            },
+            dismissButton = {
+                TextButton(onClick = {
+                    dev.pipilot.app.PipilotApp.markBatteryPromptShown(context.filesDir)
+                    showBatteryHint = false
+                }) { Text("以后再说") }
+            },
+        )
     }
 
     DisposableEffect(lifecycleOwner) {
@@ -792,6 +814,7 @@ private fun StatusStrip(ui: UiState) {
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun SettingsSheet(settings: ConnectionSettings, viewModel: PiViewModel, onDismiss: () -> Unit) {
+    val ctx = LocalContext.current
     val profiles by viewModel.profiles.collectAsState()
     var profileName by remember(profiles.activeProfileName, settings) {
         mutableStateOf(profiles.activeProfileName ?: "default")
@@ -901,6 +924,41 @@ private fun SettingsSheet(settings: ConnectionSettings, viewModel: PiViewModel, 
                     }) { Text("保存并断开") }
                 }
             }
+            Spacer(Modifier.size(12.dp))
+            Text("后台保活", style = MaterialTheme.typography.titleMedium)
+            Spacer(Modifier.size(4.dp))
+            Text(
+                "切到后台时短暂保持连接(约 10 分钟),并每 20 秒做一次应用级心跳。",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Spacer(Modifier.size(4.dp))
+            Text(
+                "vivo/小米/OPPO 等机型还会额外冻结后台网络,需要在系统里放行,否则只能靠回前台自动重连:\n" +
+                    "· 允许「忽略电池优化」\n" +
+                    "· 应用详情里打开「自启动 / 关联启动」\n" +
+                    "· 电池里选「允许后台运行 / 后台高耗电」(vivo OriginOS)",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            if (Build.VERSION.SDK_INT >= 23) {
+                val ok = isIgnoringBatteryOptimizations(ctx)
+                Spacer(Modifier.size(4.dp))
+                Text(
+                    if (ok) "当前:已允许忽略电池优化 ✅" else "当前:未允许忽略电池优化 ⚠️ 后台容易被冻网",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = if (ok) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error,
+                )
+            }
+            Spacer(Modifier.size(8.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                OutlinedButton(onClick = { maybeRequestIgnoreBatteryOptimizations(ctx) }) {
+                    Text("忽略电池优化")
+                }
+                OutlinedButton(onClick = { openAppDetailsSettings(ctx) }) {
+                    Text("应用详情")
+                }
+            }
             Spacer(Modifier.size(8.dp))
             Text("运行日志(报 bug 时复制发我)", style = MaterialTheme.typography.titleMedium)
             Spacer(Modifier.size(8.dp))
@@ -917,6 +975,7 @@ private fun LogPanel(viewModel: PiViewModel) {
     // logSeq 变化即重读
     val text = remember(ui.logSeq) { viewModel.getLogText() }
     val clipboard = androidx.compose.ui.platform.LocalClipboardManager.current
+    val ctx = LocalContext.current
     Column {
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             OutlinedButton(onClick = {
@@ -926,6 +985,29 @@ private fun LogPanel(viewModel: PiViewModel) {
             OutlinedButton(onClick = {
                 clipboard.setText(androidx.compose.ui.text.AnnotatedString(text.ifBlank { "(空)" }))
             }) { Text("复制") }
+            OutlinedButton(onClick = {
+                // 落盘日志用系统分享发出:整文件不会被粘贴/附件截断,报 bug 时直接发这个
+                val f = dev.pipilot.app.log.AppLog.logFile()
+                if (f == null || !f.exists() || f.length() == 0L) {
+                    android.widget.Toast.makeText(ctx, "还没有落盘日志", android.widget.Toast.LENGTH_SHORT).show()
+                    return@OutlinedButton
+                }
+                try {
+                    val uri = androidx.core.content.FileProvider.getUriForFile(
+                        ctx, "${ctx.packageName}.fileprovider", f,
+                    )
+                    val intent = Intent(Intent.ACTION_SEND).apply {
+                        type = "text/plain"
+                        putExtra(Intent.EXTRA_STREAM, uri)
+                        putExtra(Intent.EXTRA_SUBJECT, "PiPilot 运行日志")
+                        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                    }
+                    ctx.startActivity(Intent.createChooser(intent, "分享日志文件"))
+                    AppLog.i("KeepAlive", "shared log file ${f.length()}B")
+                } catch (e: Exception) {
+                    android.widget.Toast.makeText(ctx, "分享失败:${e.message}", android.widget.Toast.LENGTH_SHORT).show()
+                }
+            }) { Text("分享文件") }
             TextButton(onClick = { viewModel.clearLog() }) { Text("清空") }
         }
         if (expanded) {
@@ -1100,6 +1182,13 @@ private fun ExtensionDialog(d: UiDialog, onAnswer: (DialogAnswer) -> Unit) {
     )
 }
 
+/** 是否已豁免电池优化(vivo/小米等机型切后台冻结网络的主要开关)。*/
+private fun isIgnoringBatteryOptimizations(context: android.content.Context): Boolean {
+    if (Build.VERSION.SDK_INT < 23) return true
+    val pm = context.getSystemService(PowerManager::class.java) ?: return true
+    return runCatching { pm.isIgnoringBatteryOptimizations(context.packageName) }.getOrDefault(true)
+}
+
 /** 连上后请求忽略电池优化;OEM 不豁免时后台网络常被冻死。失败只记日志,不影响主流程。 */
 private fun maybeRequestIgnoreBatteryOptimizations(context: android.content.Context) {
     if (Build.VERSION.SDK_INT < 23) return
@@ -1118,5 +1207,19 @@ private fun maybeRequestIgnoreBatteryOptimizations(context: android.content.Cont
         AppLog.i("KeepAlive", "requested IGNORE_BATTERY_OPTIMIZATIONS")
     } catch (e: Exception) {
         AppLog.e("KeepAlive", "battery opt request failed: ${e.javaClass.simpleName}: ${e.message}")
+    }
+}
+
+/** 打开系统「应用详情」页:vivo/小米的「自启动/关联启动/后台运行」开关都在这一页。*/
+private fun openAppDetailsSettings(context: android.content.Context) {
+    try {
+        val intent = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
+            data = Uri.parse("package:${context.packageName}")
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        }
+        context.startActivity(intent)
+        AppLog.i("KeepAlive", "opened app details settings")
+    } catch (e: Exception) {
+        AppLog.e("KeepAlive", "open app details failed: ${e.javaClass.simpleName}: ${e.message}")
     }
 }

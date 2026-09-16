@@ -66,25 +66,35 @@ object SshConnector {
      * 连接并在远端执行 [command],返回挂起的 exec 会话。
      * 注意:host key 校验用 PromiscuousVerifier(信任所有)。移动端对个人服务器场景常见,
      * 但严格来说允许 MITM;后续版本可在设置里固定 host key。
+     *
+     * [readTimeoutMs] 是底层 socket 读超时(SO_TIMEOUT),0 = 不超时:
+     * - 长连接 RPC 用默认 0:空闲读不能被杀,否则心跳还没发出就被掐断;
+     * - 短命令(runQuick)必须传实际超时,否则远端命令挂住时 readBytes() 永久阻塞
+     *   (协程取消对阻塞 IO 无效,只有 socket 超时真的能中断)。
      */
-    suspend fun connectAndExec(config: SshConfig, command: String): SshExecSession =
+    suspend fun connectAndExec(
+        config: SshConfig,
+        command: String,
+        readTimeoutMs: Long = 0,
+    ): SshExecSession =
         withContext(Dispatchers.IO) {
             // KEEP_ALIVE = OpenSSH keepalive@openssh.com(要回复);默认 HEARTBEAT 只发 IGNORE,NAT/OEM 下不够
             val sshConfig = DefaultConfig().apply {
                 keepAliveProvider = KeepAliveProvider.KEEP_ALIVE
             }
             val client = SSHClient(sshConfig)
-            // 连接阶段超时;长连接本身禁用 SO_TIMEOUT,否则空闲读会在心跳前被掐断
+            // 连接阶段超时;读超时按调用方给(0 = 禁用 SO_TIMEOUT,供长连接空闲等待)
             client.connectTimeout = 15_000
-            client.timeout = 0
-            // SSH 应用层心跳(秒)。后台保活另靠前台服务+WakeLock/WifiLock,这里防 NAT/空闲断连
-            client.connection.keepAlive.keepAliveInterval = 10
+            client.timeout = readTimeoutMs.toInt()
+            // SSH 应用层心跳(秒)。心跳全程生效,30s 足够防 NAT/空闲断连且不至于常驻耗电;
+            // 回前台另有 get_state 探活兜底
+            client.connection.keepAlive.keepAliveInterval = 30
             (client.connection.keepAlive as? KeepAliveRunner)?.maxAliveCount = 3
             client.addHostKeyVerifier(PromiscuousVerifier())
             try {
                 AppLog.i(TAG, "connect ${config.user}@${config.host}:${config.port}")
                 client.connect(config.host, config.port)
-                AppLog.i(TAG, "tcp ok, auth=${if (config.auth is SshConfig.Auth.Password) "password" else "key"}")
+                AppLog.d(TAG, "tcp ok, auth=${if (config.auth is SshConfig.Auth.Password) "password" else "key"}")
                 when (val auth = config.auth) {
                     is SshConfig.Auth.Password ->
                         client.authPassword(config.user, auth.password)
@@ -137,7 +147,7 @@ object SshConnector {
         val provider = keyProviderFor(format, trimmed, finder)
         try {
             provider.private // 触发实际解析,格式不对这里就抛
-            AppLog.i(TAG, "key parsed ok (format=$format)")
+            AppLog.d(TAG, "key parsed ok (format=$format)")
         } catch (e: Exception) {
             AppLog.e(TAG, "key parse failed (format=$format): ${e.javaClass.simpleName}: ${e.message}")
             throw SshException("私钥解析失败(${format}): ${e.message}", e)
@@ -170,7 +180,7 @@ object SshConnector {
     /** 便捷:执行短命令并拿到完整输出(用于探测 pi 是否安装、列 session 目录等)。*/
     suspend fun runQuick(config: SshConfig, command: String, timeoutMs: Long = 15_000): String =
         withContext(Dispatchers.IO) {
-            connectAndExec(config, command).let { s ->
+            connectAndExec(config, command, readTimeoutMs = timeoutMs).let { s ->
                 try {
                     val out = s.stdout.readBytes().toString(Charsets.UTF_8)
                     s.session.join(timeoutMs, TimeUnit.MILLISECONDS)

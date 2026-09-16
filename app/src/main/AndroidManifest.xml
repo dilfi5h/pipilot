@@ -36,6 +36,16 @@
                 android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
                 android:value="Briefly keep the SSH/RPC coding-agent session alive while PiPilot is in the background" />
         </service>
+        <!-- 日志文件分享:只暴露私有 filesDir 供用户把 pipilot.log 整文件发出 -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.fileprovider"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/file_paths" />
+        </provider>
     </application>
 
 </manifest>

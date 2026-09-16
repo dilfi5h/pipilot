@@ -13,6 +13,9 @@ class PipilotApp : Application() {
 
     override fun onCreate() {
         super.onCreate()
+        // 日志落盘:后台被系统冻结/杀掉后,内存环形日志会一起消失(切后台断链一直抓不到瞬间
+        // 就是因为这个),所以生命周期级日志必须写到 filesDir
+        AppLog.init(filesDir)
         val defaultHandler = Thread.getDefaultUncaughtExceptionHandler()
         Thread.setDefaultUncaughtExceptionHandler { thread, e ->
             runCatching {
@@ -30,6 +33,8 @@ class PipilotApp : Application() {
     }
 
     companion object {
+        private const val BATTERY_PROMPT_MARK = "battery-opt-prompted"
+
         /** 启动时读取上次崩溃并入 AppLog,读完即删。返回 true 表示有崩溃记录。 */
         fun consumeLastCrash(filesDir: File): Boolean {
             val f = File(filesDir, "crash-last.txt")
@@ -40,6 +45,13 @@ class PipilotApp : Application() {
             AppLog.e("Crash", "上次闪退堆栈 ↓")
             text.lineSequence().take(60).forEach { AppLog.e("Crash", it) }
             return true
+        }
+
+        /** 后台保活引导是否已提示过:只引导一次,避免每次连上都弹系统页。*/
+        fun batteryPromptShown(filesDir: File): Boolean = File(filesDir, BATTERY_PROMPT_MARK).exists()
+
+        fun markBatteryPromptShown(filesDir: File) {
+            runCatching { File(filesDir, BATTERY_PROMPT_MARK).writeText("1") }
         }
     }
 }

@@ -61,6 +61,15 @@ class PiRpcClient(
 
     private val pending = ConcurrentHashMap<String, kotlinx.coroutines.CompletableDeferred<PiResponse>>()
 
+    /**
+     * 最近一次收到任何下行数据(响应/事件/stderr)的时刻。
+     * 判定"链路还行不行"时不能只看某个请求是否回包:agent 长工具调用期间,命令的响应可能
+     * 被拖住,但事件仍在流 → 有下行就等于链路活着,避免误判重连把正在跑的 agent 掐死。
+     */
+    @Volatile
+    private var lastInboundAt = 0L
+    val lastInboundAtMs: Long get() = lastInboundAt
+
     private val writerMutex = Mutex()
     private var writer: BufferedWriter? = null
     private var readerJob: Job? = null
@@ -155,7 +164,8 @@ class PiRpcClient(
         val deferred = kotlinx.coroutines.CompletableDeferred<PiResponse>()
         pending[id] = deferred
         val t0 = System.currentTimeMillis()
-        AppLog.i(TAG, ">> ${AppLog.redactCommand(line)}")
+        // 每条命令一条 D 级(只进内存):RPC 命令级别的噪音太大,会把断链瞬间的行挤出 800 行环形
+        AppLog.d(TAG, ">> ${AppLog.redactCommand(line)}")
         try {
             sendLine(line)
             val resp = withTimeoutOrNull(timeoutMs) { deferred.await() }
@@ -164,7 +174,9 @@ class PiRpcClient(
                 AppLog.w(TAG, "<< TIMEOUT id=$id after ${cost}ms")
             } else {
                 val dataKeys = (resp.data as? kotlinx.serialization.json.JsonObject)?.keys?.joinToString(",")
-                AppLog.i(TAG, "<< response id=$id cmd=${resp.command} success=${resp.success} error=${resp.error} dataKeys=[$dataKeys] (${cost}ms)")
+                val detail = "<< response id=$id cmd=${resp.command} success=${resp.success} error=${resp.error} dataKeys=[$dataKeys] (${cost}ms)"
+                // 成功响应是噪音,失败才是证据
+                if (resp.success) AppLog.d(TAG, detail) else AppLog.w(TAG, detail)
             }
             return resp
         } finally {
@@ -183,6 +195,7 @@ class PiRpcClient(
             while (kotlin.coroutines.coroutineContext.isActive) {
                 val n = reader.read(buf)
                 if (n < 0) break
+                lastInboundAt = System.currentTimeMillis()
                 for (i in 0 until n) {
                     val c = buf[i]
                     if (c == '\n') {
@@ -242,6 +255,7 @@ class PiRpcClient(
             while (kotlin.coroutines.coroutineContext.isActive) {
                 val n = reader.read(buf)
                 if (n < 0) break
+                lastInboundAt = System.currentTimeMillis()
                 val text = String(buf, 0, n)
                 noteStderr(text)
                 Log.w(TAG, "stderr: ${text.take(500)}")

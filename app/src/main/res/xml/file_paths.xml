@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<paths>
+    <!-- 日志分享:只暴露 App 私有文件目录(包含 pipilot.log)。 -->
+    <files-path name="app_files" path="." />
+</paths>

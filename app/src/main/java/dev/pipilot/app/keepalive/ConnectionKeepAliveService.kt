@@ -116,11 +116,8 @@ class ConnectionKeepAliveService : Service() {
     private fun acquireWifiLock() {
         if (wifiLock?.isHeld == true) return
         val wm = applicationContext.getSystemService(WifiManager::class.java) ?: return
-        val mode = if (Build.VERSION.SDK_INT >= 29) {
-            WifiManager.WIFI_MODE_FULL_LOW_LATENCY
-        } else {
-            WifiManager.WIFI_MODE_FULL_HIGH_PERF
-        }
+        // 统一用 FULL_HIGH_PERF(保 SSH 长连接不断链);LOW_LATENCY 语义是低时延实时场景且 API 34 起废弃
+        val mode = WifiManager.WIFI_MODE_FULL_HIGH_PERF
         wifiLock = wm.createWifiLock(mode, "pipilot:ssh_wifi").apply {
             setReferenceCounted(false)
             acquire()

@@ -1,11 +1,15 @@
 package dev.pipilot.app.ui
 
 import android.app.Application
+import android.net.ConnectivityManager
+import android.net.Network
+import android.net.NetworkCapabilities
 import android.util.Log
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import dev.pipilot.app.chat.ChatItem
 import dev.pipilot.app.chat.StreamReducer
+import dev.pipilot.app.keepalive.ConnectionKeepAliveService
 import dev.pipilot.app.log.AppLog
 import dev.pipilot.app.rpc.PiCommands
 import dev.pipilot.app.rpc.PiEvent
@@ -24,7 +28,10 @@ import dev.pipilot.app.settings.SettingsStore
 import dev.pipilot.app.ssh.SshConfig
 import dev.pipilot.app.ssh.SshConnector
 import dev.pipilot.app.ssh.SshExecSession
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -99,6 +106,54 @@ class PiViewModel(app: Application) : AndroidViewModel(app) {
 
     private val _ui = MutableStateFlow(UiState())
     val ui: StateFlow<UiState> = _ui.asStateFlow()
+
+    // ---------- 网络变化 & 应用级心跳 ----------
+
+    /** 默认网络回调:换网/断网时 Android 会悄悄废掉 socket,不等 readLoop 报错就该知情。*/
+    private val connectivity: ConnectivityManager? =
+        app.getSystemService(ConnectivityManager::class.java)
+    private var networkWatchRegistered = false
+    private var heartbeatJob: Job? = null
+
+    /** 是否在后台(由 PiScreen 生命周期维护):后台心跳加密,前台放宽省电。*/
+    @Volatile private var backgrounded = false
+
+    private val networkCallback = object : ConnectivityManager.NetworkCallback() {
+        override fun onAvailable(network: Network) {
+            when {
+                _ui.value.reconnecting -> {
+                    AppLog.i(TAG, "network available -> reconnect now")
+                    reconnectNow("网络已恢复")
+                }
+                _ui.value.connected -> {
+                    AppLog.i(TAG, "network available -> probe")
+                    probeAndMaybeReconnect("网络已恢复")
+                }
+                else -> AppLog.i(TAG, "network available (idle)")
+            }
+        }
+
+        override fun onLost(network: Network) {
+            AppLog.w(TAG, "network lost (connected=${_ui.value.connected}, reconnecting=${_ui.value.reconnecting})")
+            // 这条 socket 已随网络一起死:别等 readLoop/心跳超时,直接进重连循环
+            if (!userDisconnect && _ui.value.connected) scheduleReconnect("网络断开")
+        }
+
+        override fun onCapabilitiesChanged(network: Network, caps: NetworkCapabilities) {
+            if (!caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)) {
+                AppLog.w(TAG, "network not validated (no internet)")
+            }
+        }
+    }
+
+    init {
+        runCatching { connectivity?.registerDefaultNetworkCallback(networkCallback) }
+            .onSuccess {
+                networkWatchRegistered = true
+                AppLog.i(TAG, "network watch registered")
+            }
+            .onFailure { AppLog.w(TAG, "network watch failed: ${it.javaClass.simpleName}: ${it.message}") }
+    }
 
     private var ssh: SshExecSession? = null
     private var client: PiRpcClient? = null
@@ -187,6 +242,9 @@ class PiViewModel(app: Application) : AndroidViewModel(app) {
             client = rpc
             rpc.start()
             observeClient(rpc, epoch)
+            // 应用级心跳:SSH 传输层的心跳只能证明 SSH 活着,证明不了这个 socket 还有下行;
+            // 后台被系统收走网络时,readLoop 可能既不报错也不返回,必须自己打探
+            restartHeartbeat()
             connectedAtMs = System.currentTimeMillis()
             // 重连也全量重建:直播消息不推进游标,增量同步会把已上屏的消息重复 append
             if (!resetItems) lastEntryId = null
@@ -251,11 +309,11 @@ class PiViewModel(app: Application) : AndroidViewModel(app) {
      * 意外断开后的自动重连循环:指数退避 2s → 4s → 8s … 30s 封顶,无限重试直到
      * 成功、用户手动断开/取消,或 ViewModel 销毁。等待期间每秒刷新倒计时 UI。
      */
-    private fun scheduleReconnect(reason: String?) {
+    private fun scheduleReconnect(reason: String?, immediate: Boolean = false) {
         reconnectJob?.cancel()
         reconnectJob = viewModelScope.launch {
             val epoch = ++connectEpoch
-            var delaySecs = RECONNECT_BASE_SECS
+            var delaySecs = if (immediate) 0 else RECONNECT_BASE_SECS
             var attempt = 0
             while (isActive && epoch == connectEpoch && !userDisconnect) {
                 attempt++
@@ -277,12 +335,13 @@ class PiViewModel(app: Application) : AndroidViewModel(app) {
                 closeResources()
                 if (attemptConnect(epoch, resetItems = false)) return@launch
                 if (!isActive || epoch != connectEpoch || userDisconnect) return@launch
-                delaySecs = (delaySecs * 2).coerceAtMost(RECONNECT_MAX_SECS)
+                delaySecs = if (delaySecs == 0) RECONNECT_BASE_SECS else (delaySecs * 2).coerceAtMost(RECONNECT_MAX_SECS)
             }
         }
     }
 
     private suspend fun closeResources() {
+        stopHeartbeat()
         runCatching { client?.close() }
         runCatching { ssh?.close() }
         client = null
@@ -300,6 +359,7 @@ class PiViewModel(app: Application) : AndroidViewModel(app) {
                             return@collect
                         }
                         // 断开瞬间旧 client 已不可用,清掉引用后进入重连循环
+                        stopHeartbeat()
                         client = null
                         ssh = null
                         val reason = st.reason
@@ -462,41 +522,119 @@ class PiViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     /**
-     * 回前台时主动探活:后台冻结期间 socket 可能已死但 readLoop 要解冻后才报 Closed。
-     * 轻量 get_state;写失败或超时都主动拆连接并 scheduleReconnect,避免 UI 一直显示已连接。
+     * 回前台 / 网络恢复时主动探活:后台冻结期间 socket 可能已死,但 readLoop 要等解冻才报 Closed。
+     * 轻量 get_state;超时且期间没有任何下行才算死,随后拆连接并进重连循环,避免 UI 一直显示"已连接"。
      * 已在重连中则跳过。
      */
-    fun onForegroundResume() {
+    fun onForegroundResume() = probeAndMaybeReconnect("回前台")
+
+    private fun probeAndMaybeReconnect(reason: String) {
         val snap = _ui.value
         if (!snap.connected || snap.reconnecting || snap.connecting || userDisconnect) return
         val rpc = client ?: return
-        val sshSession = ssh
         viewModelScope.launch {
-            AppLog.i(TAG, "foreground resume probe get_state")
+            AppLog.i(TAG, "probe get_state ($reason)")
             val id = PiCommands.nextId()
-            val resp = rpc.request(PiCommands.named("get_state", id = id), id, timeoutMs = 8_000)
+            val sentAt = System.currentTimeMillis()
+            val resp = rpc.request(PiCommands.named("get_state", id = id), id, timeoutMs = RESUME_PROBE_TIMEOUT_MS)
             if (resp != null) {
-                AppLog.i(TAG, "resume probe ok success=${resp.success}")
+                AppLog.i(TAG, "probe ok ($reason) success=${resp.success}")
                 return@launch
             }
-            // 8s 等待期间可能已手动断开 / 另开连接 / 已进入重连
+            // 等待期间可能已手动断开 / 另开连接 / 已进入重连
             if (userDisconnect || client !== rpc || !_ui.value.connected) {
-                AppLog.i(TAG, "resume probe TIMEOUT ignored (state changed)")
+                AppLog.i(TAG, "probe TIMEOUT ignored (state changed)")
                 return@launch
             }
-            AppLog.w(TAG, "resume probe TIMEOUT; forcing reconnect")
-            client = null
-            ssh = null
-            runCatching { rpc.close() }
-            runCatching { sshSession?.close() }
-            scheduleReconnect("后台探活超时")
+            // 超时期间只要有下行(响应/事件/stderr)就算活着:agent 长工具调用会把命令响应拖住,
+            // 误判重连会把正在跑的 agent 掐死
+            if (rpc.lastInboundAtMs > sentAt) {
+                AppLog.w(TAG, "probe TIMEOUT but inbound traffic seen ($reason); keep connection")
+                return@launch
+            }
+            AppLog.w(TAG, "probe TIMEOUT ($reason); forcing reconnect")
+            forceReconnect(reason)
         }
+    }
+
+    /** 主动拆掉当前连接并进入重连循环(探活超时 / 网络变化用)。*/
+    private fun forceReconnect(reason: String) {
+        val rpc = client
+        val session = ssh
+        client = null
+        ssh = null
+        stopHeartbeat()
+        if (rpc != null || session != null) {
+            viewModelScope.launch {
+                runCatching { rpc?.close() }
+                runCatching { session?.close() }
+            }
+        }
+        scheduleReconnect(reason)
+    }
+
+    /** 立刻重试(不退避):网络刚恢复时用,退避只适用于"远端还没好"的场景。*/
+    private fun reconnectNow(reason: String) {
+        if (userDisconnect) return
+        AppLog.i(TAG, "reconnect now ($reason)")
+        scheduleReconnect(reason, immediate = true)
+    }
+
+    /** PiScreen 生命周期驱动:后台心跳加密(尽快发现 socket 被系统收走),前台放宽省电。*/
+    fun setBackgrounded(value: Boolean) {
+        if (backgrounded == value) return
+        backgrounded = value
+        AppLog.i(
+            TAG,
+            "app ${if (value) "background" else "foreground"}; heartbeat=${if (value) HEARTBEAT_BG_MS / 1000 else HEARTBEAT_FG_MS / 1000}s",
+        )
+        if (client != null) restartHeartbeat()
+    }
+
+    /**
+     * 应用级心跳。为什么不能只靠 SSH 层心跳:传输层心跳只证明 SSH 链路能收发包,
+     * 而且 SO_TIMEOUT=0 时死 socket 会一直阻塞在 read,既不报错也不返回 —— 只有主动打探 + 看下行
+     * 才能分清"链路真死了"和"agent 正在长工具调用没空回包"。
+     */
+    private fun restartHeartbeat() {
+        val rpc = client ?: return
+        stopHeartbeat()
+        heartbeatJob = viewModelScope.launch {
+            while (isActive && client === rpc && !userDisconnect) {
+                val interval = if (backgrounded) HEARTBEAT_BG_MS else HEARTBEAT_FG_MS
+                delay(interval)
+                if (client !== rpc) return@launch
+                // 最近有下行 → 链路活着,不用打探
+                if (System.currentTimeMillis() - rpc.lastInboundAtMs < interval) continue
+                val id = PiCommands.nextId()
+                val sentAt = System.currentTimeMillis()
+                val resp = rpc.request(PiCommands.named("get_state", id = id), id, timeoutMs = HEARTBEAT_TIMEOUT_MS)
+                if (resp != null) {
+                    AppLog.d(TAG, "heartbeat ok (${System.currentTimeMillis() - sentAt}ms)")
+                    continue
+                }
+                if (rpc.lastInboundAtMs > sentAt) {
+                    AppLog.w(TAG, "heartbeat TIMEOUT but inbound traffic seen; keep connection")
+                    continue
+                }
+                AppLog.w(TAG, "heartbeat TIMEOUT, no inbound since ${sentAt}; forcing reconnect")
+                forceReconnect("心跳超时")
+                return@launch
+            }
+        }
+    }
+
+    private fun stopHeartbeat() {
+        heartbeatJob?.cancel()
+        heartbeatJob = null
     }
 
     private suspend fun refreshState() {
         val line = PiCommands.named("get_state")
         val resp = client?.request(line, extractId(line) ?: return)
-        AppLog.i(TAG, "get_state -> ${if (resp == null) "TIMEOUT" else "success=${resp.success} err=${resp.error}"}")
+        // 例行刷新用 D(不落盘);TIMEOUT / success=false 才算证据
+        if (resp?.success == true) AppLog.d(TAG, "get_state -> success=true err=null")
+        else AppLog.w(TAG, "get_state -> ${if (resp == null) "TIMEOUT" else "success=${resp.success} err=${resp.error}"}")
         if (resp?.success == true && resp.data != null) {
             val state = PiState.from(JsonObject(mapOf("data" to resp.data!!)))
             // 记住当前会话文件,断线重连时用 --session 恢复
@@ -519,7 +657,8 @@ class PiViewModel(app: Application) : AndroidViewModel(app) {
             ?: emptyList()
         val patterns = readEnabledModelPatterns()
         val models = filterEnabledModels(available, patterns)
-        AppLog.i(TAG, "get_available_models -> ${if (resp == null) "TIMEOUT" else "success=${resp.success} available=${available.size} filtered=${models.size} patterns=${patterns?.size ?: 0}"}")
+        val detail = "get_available_models -> ${if (resp == null) "TIMEOUT" else "success=${resp.success} available=${available.size} filtered=${models.size} patterns=${patterns?.size ?: 0}"}"
+        if (resp?.success == true) AppLog.d(TAG, detail) else AppLog.w(TAG, detail)
         _ui.value = _ui.value.copy(models = models)
     }
 
@@ -577,14 +716,15 @@ class PiViewModel(app: Application) : AndroidViewModel(app) {
         // 服务端找不到游标时,退回全量同步并重置本地历史;since 必须一并置空,
         // 否则全量快照会 merge 到整个旧列表上,整段对话显示两遍
         if (resp?.success != true && since != null) {
-            AppLog.i(TAG, "get_entries since=$since failed; retrying full")
+            AppLog.w(TAG, "get_entries since=$since failed; retrying full")
             lastEntryId = null
             since = null
             val retryId = PiCommands.nextId()
             resp = client?.request(PiCommands.getEntries(id = retryId), retryId)
         }
         val entries = (resp?.data?.get("entries") as? JsonArray)
-        AppLog.i(TAG, "get_entries -> ${if (resp == null) "TIMEOUT" else "success=${resp.success} since=${since ?: "<full>"} count=${entries?.size}"}")
+        val histDetail = "get_entries -> ${if (resp == null) "TIMEOUT" else "success=${resp.success} since=${since ?: "<full>"} count=${entries?.size}"}"
+        if (resp?.success == true) AppLog.d(TAG, histDetail) else AppLog.w(TAG, histDetail)
         if (entries == null || resp?.success != true) return
         val items = ArrayList<ChatItem>()
         for (entryElement in entries) {
@@ -805,12 +945,21 @@ class PiViewModel(app: Application) : AndroidViewModel(app) {
         connectEpoch++
         userDisconnect = true
         reconnectJob?.cancel()
-        // Activity 真正销毁时关掉套接字,避免 SSH/RPC 泄漏到进程退出
-        runCatching {
-            kotlinx.coroutines.runBlocking {
-                closeResources()
+        // Activity 真正销毁时关掉套接字,避免 SSH/RPC 泄漏到进程退出。
+        // 关闭会阻塞到 socket 收尾,放独立 IO 作用域异步做,不在主线程 runBlocking(有 ANR 面)
+        val closingClient = client
+        val closingSsh = ssh
+        client = null
+        ssh = null
+        if (closingClient != null || closingSsh != null) {
+            CoroutineScope(Dispatchers.IO + SupervisorJob()).launch {
+                runCatching { closingClient?.close() }
+                runCatching { closingSsh?.close() }
             }
         }
+        // 连接已随 ViewModel 关闭,保活服务失去意义:立刻停掉,
+        // 否则 FGS 会持 Wakelock/WifiLock 空转到 10 分钟窗口结束(stopWithTask=false 时还会活过划掉 App)
+        runCatching { ConnectionKeepAliveService.stop(getApplication()) }
         super.onCleared()
     }
 }
@@ -823,6 +972,14 @@ sealed interface DialogAnswer {
 
 private const val RECONNECT_BASE_SECS = 2
 private const val RECONNECT_MAX_SECS = 30
+
+/** 后台心跳间隔:切后台后加密,尽快发现"系统把 socket 收走了"。*/
+private const val HEARTBEAT_BG_MS = 20_000L
+/** 前台心跳间隔:链路有 RPC 流量时本来就会续命,这里只做兜底,省电优先。*/
+private const val HEARTBEAT_FG_MS = 60_000L
+/** 心跳/探活的 get_state 超时;超时后还要看期间有没有任何下行才算死。*/
+private const val HEARTBEAT_TIMEOUT_MS = 10_000L
+private const val RESUME_PROBE_TIMEOUT_MS = 8_000L
 
 private fun ConnectionSettings.toSshConfig(): SshConfig = SshConfig(
     host = host,
