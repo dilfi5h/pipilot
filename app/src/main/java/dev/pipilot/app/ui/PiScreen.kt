@@ -117,7 +117,7 @@ fun PiScreen(viewModel: PiViewModel) {
     var showSessions by remember { mutableStateOf(false) }
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
-    // pausedOrStopped: ON_PAUSE 起就算离开前台,比 ON_STOP 更早启保活
+    // pausedOrStopped: treat ON_PAUSE as leaving foreground so keep-alive starts earlier than ON_STOP
     var pausedOrStopped by remember { mutableStateOf(false) }
     var notifDeniedHinted by rememberSaveable { mutableStateOf(false) }
     var showBatteryHint by rememberSaveable { mutableStateOf(false) }
@@ -129,25 +129,25 @@ fun PiScreen(viewModel: PiViewModel) {
         AppLog.i("KeepAlive", "POST_NOTIFICATIONS granted=$granted")
         if (!granted && !notifDeniedHinted) {
             notifDeniedHinted = true
-            // 拒绝后不启 FGS;仍可依赖心跳 + 回前台重连
+            // If denied, do not start FGS; still rely on heartbeat + foreground reconnect
             scope.launch {
-                snackbar.showSnackbar("未开通知权限：切后台可能很快断线，回前台会自动重连")
+                snackbar.showSnackbar("Notification permission off: background may drop soon; returning to foreground reconnects")
             }
         }
     }
 
     val needsKeepAlive = ui.connected || ui.reconnecting || ui.connecting
-    // observer 闭包读最新值,避免 ON_PAUSE 拿到过期的 connected
+    // Observer closure reads the latest value so ON_PAUSE does not see a stale connected flag
     val needsKeepAliveRef = remember { mutableStateOf(needsKeepAlive) }
     needsKeepAliveRef.value = needsKeepAlive
 
-    // 连上后只在需要时申请通知权限;「忽略电池优化」用 App 内对话框引导一次(不直接弹系统页)
+    // After connect, request notification permission only when needed; battery-opt ignore is prompted once via an in-app dialog (not the system page directly)
     LaunchedEffect(ui.connected) {
         if (!ui.connected) return@LaunchedEffect
         if (Build.VERSION.SDK_INT >= 33 && !ConnectionKeepAliveService.canPostNotifications(context)) {
             notifPermissionLauncher.launch(android.Manifest.permission.POST_NOTIFICATIONS)
         }
-        // vivo/小米/OPPO 等机型切后台会冻结网络,忽略电池优化基本是保活的前提;只引导一次,可拒绝
+        // vivo/Xiaomi/OPPO freeze background networking; ignoring battery optimization is basically required for keep-alive; prompt once, user may refuse
         if (!isIgnoringBatteryOptimizations(context) && !dev.pipilot.app.PipilotApp.batteryPromptShown(context.filesDir)) {
             showBatteryHint = true
         }
@@ -156,13 +156,13 @@ fun PiScreen(viewModel: PiViewModel) {
     if (showBatteryHint) {
         AlertDialog(
             onDismissRequest = { showBatteryHint = false },
-            title = { Text("后台保活需要一项授权") },
+            title = { Text("Background keep-alive needs one permission") },
             text = {
                 Text(
-                    "这台机型在切到后台后会冻结应用网络,只有前台服务+心跳保不住 SSH 连接。\n\n" +
-                        "建议允许 PiPilot「忽略电池优化」;更彻底的做法是在系统设置里再打开" +
-                        "「自启动/关联启动」和电池的「允许后台运行」。\n\n" +
-                        "不授权也能用,只是切后台容易断线,回前台会自动重连。",
+                    "This device freezes app networking in the background; FGS + heartbeat alone cannot keep SSH up.\n\n" +
+                        "Allow PiPilot to ignore battery optimization. For a stronger setup, also enable " +
+                        "autostart / associated start and battery background running in system settings.\n\n" +
+                        "You can refuse; the app still works, but background drops are more likely and returning to foreground reconnects.",
                 )
             },
             confirmButton = {
@@ -170,13 +170,13 @@ fun PiScreen(viewModel: PiViewModel) {
                     dev.pipilot.app.PipilotApp.markBatteryPromptShown(context.filesDir)
                     showBatteryHint = false
                     maybeRequestIgnoreBatteryOptimizations(context)
-                }) { Text("去授权") }
+                }) { Text("Allow") }
             },
             dismissButton = {
                 TextButton(onClick = {
                     dev.pipilot.app.PipilotApp.markBatteryPromptShown(context.filesDir)
                     showBatteryHint = false
-                }) { Text("以后再说") }
+                }) { Text("Not now") }
             },
         )
     }
@@ -188,7 +188,7 @@ fun PiScreen(viewModel: PiViewModel) {
                     pausedOrStopped = true
                     viewModel.setBackgrounded(true)
                     AppLog.i("KeepAlive", "app pause needsKeepAlive=${needsKeepAliveRef.value}")
-                    // 同步抢跑启 FGS,赶在系统冻网前;未连接则不启
+                    // Start FGS eagerly before the OS freezes the network; skip if not connected
                     if (needsKeepAliveRef.value && ConnectionKeepAliveService.canPostNotifications(context)) {
                         ConnectionKeepAliveService.start(context)
                     }
@@ -210,8 +210,8 @@ fun PiScreen(viewModel: PiViewModel) {
         onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
     }
 
-    // 需要保活且已离开前台 → 启;回到前台或彻底断开 → 停
-    // 重连过程中也保持 FGS,避免"断了→停服务→更难连上"的抖动
+    // Need keep-alive and left foreground → start; back to foreground or fully disconnected → stop
+    // Keep FGS during reconnect too, so "drop → stop service → harder to reconnect" does not thrash
     LaunchedEffect(needsKeepAlive, pausedOrStopped) {
         if (needsKeepAlive && pausedOrStopped) {
             if (ConnectionKeepAliveService.canPostNotifications(context)) {
@@ -250,18 +250,18 @@ fun PiScreen(viewModel: PiViewModel) {
                             ModelPicker(viewModel, ui)
                             ThinkingPicker(viewModel, ui)
                             IconButton(onClick = { viewModel.listSessions(); showSessions = true }) {
-                                Icon(Icons.Filled.List, "会话")
+                                Icon(Icons.Filled.List, "Sessions")
                             }
                             IconButton(onClick = { viewModel.newSession() }) {
-                                Icon(Icons.Filled.Add, "新会话")
+                                Icon(Icons.Filled.Add, "New session")
                             }
                         }
                         IconButton(onClick = { showSettings = true }) {
-                            Icon(Icons.Filled.Settings, "设置")
+                            Icon(Icons.Filled.Settings, "Settings")
                         }
                     },
                 )
-                // 会话名独立成一行:独占整行宽度,不再跟右上角图标抢地方;点击可重命名
+                // Session name on its own row: full width, no longer fighting top-right icons; tap to rename
                 if (ui.connected || ui.reconnecting) {
                     Surface(color = MaterialTheme.colorScheme.surface) {
                         Text(
@@ -278,18 +278,18 @@ fun PiScreen(viewModel: PiViewModel) {
                 }
             }
         },
-        // 输入框固定底部槽位,不再跟聊天列表抢空间
+        // Composer fixed in the bottom bar so it does not fight the chat list for space
         bottomBar = { if (ui.connected) InputBar(viewModel, ui) },
     ) { padding ->
         Column(Modifier.padding(padding).fillMaxSize()) {
-            // 重连时保留聊天+横幅;只有从未连上(或用户取消)才回到空连接页
+            // Keep chat + banner while reconnecting; only never-connected (or user cancel) returns to the empty connect page
             if (!ui.connected && !ui.reconnecting) {
                 NotConnectedView(ui, settings, viewModel)
             } else {
                 if (ui.reconnecting) {
                     ReconnectBanner(ui, viewModel)
                 }
-                ChatList(ui, modifier = Modifier.weight(1f))
+                ChatList(ui, onClearQueue = viewModel::clearQueueToEditor, modifier = Modifier.weight(1f))
             }
         }
     }
@@ -309,20 +309,20 @@ fun PiScreen(viewModel: PiViewModel) {
 }
 
 private fun sessionLabel(ui: UiState): String {
-    // 会话名→文件名→"未连接",标题栏横条共用
+    // Session name → file name → "Disconnected"; shared by the title strip
     return ui.state?.sessionName?.takeIf { it.isNotBlank() }
         ?: ui.state?.sessionFile?.substringAfterLast('/')?.takeIf { it.isNotBlank() }
-        ?: "未连接"
+        ?: "Disconnected"
 }
 
 @Composable
 private fun ModelPicker(viewModel: PiViewModel, ui: UiState) {
     var open by remember { mutableStateOf(false) }
     Box {
-        IconButton(onClick = { open = true }) { Icon(Icons.Filled.Memory, "模型") }
+        IconButton(onClick = { open = true }) { Icon(Icons.Filled.Memory, "Model") }
         DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
             if (ui.models.isEmpty()) {
-                DropdownMenuItem(text = { Text("无可用模型") }, onClick = { open = false })
+                DropdownMenuItem(text = { Text("No models available") }, onClick = { open = false })
             }
             ui.models.forEach { m ->
                 val current = ui.state?.model?.id == m.id && ui.state?.model?.provider == m.provider
@@ -341,7 +341,7 @@ private fun ThinkingPicker(viewModel: PiViewModel, ui: UiState) {
     if (ui.thinkingLevels.size <= 1) return
     Box {
         TextButton(onClick = { open = true }) {
-            Text(ui.state?.thinkingLevel ?: "思考", style = MaterialTheme.typography.labelLarge)
+            Text(ui.state?.thinkingLevel ?: "Thinking", style = MaterialTheme.typography.labelLarge)
         }
         DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
             ui.thinkingLevels.forEach { lv ->
@@ -361,11 +361,11 @@ private fun NotConnectedView(ui: UiState, settings: ConnectionSettings, viewMode
         verticalArrangement = Arrangement.Center,
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
-        Text("连接到运行 pi 的机器", style = MaterialTheme.typography.titleLarge)
+        Text("Connect to a machine running pi", style = MaterialTheme.typography.titleLarge)
         Spacer(Modifier.size(8.dp))
         Text(
-            if (settings.host.isBlank()) "先在右上角 ⚙ 设置里填 SSH 主机、用户和密码/密钥。"
-            else "目标:${settings.user}@${settings.host}:${settings.port}",
+            if (settings.host.isBlank()) "Fill SSH host, user, and password/key in ⚙ Settings (top right)."
+            else "Target: ${settings.user}@${settings.host}:${settings.port}",
             style = MaterialTheme.typography.bodyMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
@@ -379,9 +379,9 @@ private fun NotConnectedView(ui: UiState, settings: ConnectionSettings, viewMode
             Spacer(Modifier.size(8.dp))
             Text(ui.connectionLabel)
             Spacer(Modifier.size(8.dp))
-            OutlinedButton(onClick = { viewModel.cancelReconnect() }) { Text("取消重连") }
+            OutlinedButton(onClick = { viewModel.cancelReconnect() }) { Text("Cancel reconnect") }
         } else {
-            Button(onClick = { viewModel.connect() }) { Text("连接") }
+            Button(onClick = { viewModel.connect() }) { Text("Connect") }
         }
         ui.error?.let {
             Spacer(Modifier.size(12.dp))
@@ -407,15 +407,40 @@ private fun ReconnectBanner(ui: UiState, viewModel: PiViewModel) {
                 style = MaterialTheme.typography.bodySmall,
                 modifier = Modifier.weight(1f),
             )
-            TextButton(onClick = { viewModel.cancelReconnect() }) { Text("取消") }
+            TextButton(onClick = { viewModel.cancelReconnect() }) { Text("Cancel") }
         }
     }
 }
 
 @Composable
-private fun ChatList(ui: UiState, modifier: Modifier = Modifier) {
+private fun QueueBanner(ui: UiState, onClear: () -> Unit) {
+    val parts = buildList {
+        if (ui.queueSteering.isNotEmpty()) add("steer ${ui.queueSteering.size}")
+        if (ui.queueFollowUp.isNotEmpty()) add("queue ${ui.queueFollowUp.size}")
+    }
+    Surface(
+        color = MaterialTheme.colorScheme.secondaryContainer,
+        shape = RoundedCornerShape(12.dp),
+    ) {
+        Row(
+            Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 6.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(
+                "Pending: ${parts.joinToString(" · ")}",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSecondaryContainer,
+                modifier = Modifier.weight(1f),
+            )
+            TextButton(onClick = onClear) { Text("Recall") }
+        }
+    }
+}
+
+@Composable
+private fun ChatList(ui: UiState, onClearQueue: () -> Unit, modifier: Modifier = Modifier) {
     val listState = rememberLazyListState()
-    // 条数变化或最后一条内容变化都贴底;用户主动往上翻(不在底部)时不打扰
+    // Stick to bottom on count or last-item content changes; do not interrupt when the user scrolled up
     val lastItemLen = ui.items.lastOrNull()?.let { it.textLength() } ?: 0
     val lastKey = ui.items.lastOrNull()?.key
     val followBottom = remember(ui.items.size) { mutableStateOf(true) }
@@ -425,7 +450,7 @@ private fun ChatList(ui: UiState, modifier: Modifier = Modifier) {
     LaunchedEffect(lastKey, lastItemLen) {
         if (ui.items.isNotEmpty() && followBottom.value) listState.scrollToItem(ui.items.size - 1)
     }
-    // 用户往回滚(距底 >2 条)就停止跟随,回到底部附近恢复
+    // Stop following when the user scrolls up (>2 items from bottom); resume near the bottom
     LaunchedEffect(listState.isScrollInProgress) {
         if (!listState.isScrollInProgress) {
             val atBottom = listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index?.let { it >= ui.items.size - 2 } ?: true
@@ -452,22 +477,18 @@ private fun ChatList(ui: UiState, modifier: Modifier = Modifier) {
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                             modifier = Modifier.alpha(0.8f),
                         )
-                        // RemoveLive 只在 VM 层消费,永远不会进列表,兜底不渲染
+                        // RemoveLive is consumed only in the VM and never enters the list; ignore as a fallback
                         else -> Unit
                     }
                 }
                 if (ui.queueSteering.isNotEmpty() || ui.queueFollowUp.isNotEmpty()) {
                     item(key = "queue") {
-                        Text(
-                            "排队中:${ui.queueSteering.size} 条 steering,${ui.queueFollowUp.size} 条 follow-up",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
+                        QueueBanner(ui, onClear = onClearQueue)
                     }
                 }
             }
         }
-        // 上翻后出现,点击回到最新消息
+        // Shown after scrolling up; tap to jump to the latest message
         if (!followBottom.value) {
             val scope = androidx.compose.runtime.rememberCoroutineScope()
             IconButton(
@@ -481,13 +502,13 @@ private fun ChatList(ui: UiState, modifier: Modifier = Modifier) {
                     .size(40.dp)
                     .background(MaterialTheme.colorScheme.surfaceVariant, RoundedCornerShape(20.dp)),
             ) {
-                Icon(Icons.Filled.KeyboardArrowDown, "滚到底部")
+                Icon(Icons.Filled.KeyboardArrowDown, "Scroll to bottom")
             }
         }
     }
 }
 
-/** 估算条目内容长度,用于流式期间检测"最后一条在变长"。*/
+/** Estimate item content length to detect "last item is still growing" while streaming. */
 private fun ChatItem.textLength(): Int = when (this) {
     is ChatItem.UserText -> text.length
     is ChatItem.AssistantText -> text.length
@@ -544,7 +565,7 @@ private fun AssistantBubble(item: ChatItem.AssistantText) {
                 Column(Modifier.padding(12.dp).widthIn(max = 320.dp).animateContentSize()) {
                     if (!item.thinking.isNullOrBlank()) {
                         Text(
-                            "思考中…",
+                            "Thinking…",
                             style = MaterialTheme.typography.labelSmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
@@ -563,7 +584,7 @@ private fun AssistantBubble(item: ChatItem.AssistantText) {
                 }
             }
         }
-        // 流式中的 live 气泡不显示时间(时间会每帧变,等落 final 再显示)
+        // Hide time on the live streaming bubble (it would change every frame; show after final)
         if (!item.streaming && item.timeMs > 0) {
             Text(
                 dev.pipilot.app.chat.formatShanghai(item.timeMs),
@@ -664,7 +685,7 @@ private fun BashCard(item: ChatItem.BashOutput) {
 private fun InputBar(viewModel: PiViewModel, ui: UiState) {
     var text by rememberSaveable { mutableStateOf("") }
     var preparing by remember { mutableStateOf(false) }
-    // 待发送图片的 base64 体积大,不进 rememberSaveable,只放 composition 内的 remember
+    // Pending image base64 is large; keep it in remember, not rememberSaveable
     val pendingImagePayloads = remember { mutableStateListOf<dev.pipilot.app.chat.PreparedImage>() }
     val context = androidx.compose.ui.platform.LocalContext.current
     val scope = rememberCoroutineScope()
@@ -674,7 +695,7 @@ private fun InputBar(viewModel: PiViewModel, ui: UiState) {
         if (uris.isEmpty()) return@rememberLauncherForActivityResult
         val slotsLeft = (4 - pendingImagePayloads.size).coerceAtLeast(0)
         if (slotsLeft <= 0) {
-            android.widget.Toast.makeText(context, "最多附带 4 张图片", android.widget.Toast.LENGTH_SHORT).show()
+            android.widget.Toast.makeText(context, "At most 4 images", android.widget.Toast.LENGTH_SHORT).show()
             return@rememberLauncherForActivityResult
         }
         preparing = true
@@ -686,7 +707,7 @@ private fun InputBar(viewModel: PiViewModel, ui: UiState) {
             }
             kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
                 if (prepared.size < uris.size) {
-                    android.widget.Toast.makeText(context, "有 ${uris.size - prepared.size} 张图片读取失败,已跳过", android.widget.Toast.LENGTH_SHORT).show()
+                    android.widget.Toast.makeText(context, "${uris.size - prepared.size} image(s) failed to load and were skipped", android.widget.Toast.LENGTH_SHORT).show()
                 }
                 pendingImagePayloads.addAll(prepared)
                 preparing = false
@@ -697,9 +718,27 @@ private fun InputBar(viewModel: PiViewModel, ui: UiState) {
             )
         }
     }
+    LaunchedEffect(ui.restoreDraft) {
+        val draft = ui.restoreDraft ?: return@LaunchedEffect
+        text = if (text.isBlank()) draft else "${text.trim()}\n\n$draft"
+        viewModel.consumeRestoreDraft()
+    }
+    fun takeImages(): List<Pair<String, String>> {
+        val images = pendingImagePayloads.map { it.base64 to it.mimeType }
+        if (images.isNotEmpty()) {
+            val kb = images.sumOf { it.first.length } / 1024
+            dev.pipilot.app.log.AppLog.i("InputBar", "send with ${images.size} image(s), ~${kb}KB base64")
+        }
+        return images
+    }
+    fun afterSend() {
+        text = ""
+        pendingImagePayloads.clear()
+    }
+    val canSend = text.isNotBlank() || pendingImagePayloads.isNotEmpty()
     Surface(tonalElevation = 3.dp) {
         Column(Modifier.fillMaxWidth().imePadding()) {
-            // 状态条:模型 · thinking · token/上下文,固定单行,输入框正上方,绝不遮挡
+            // Status strip: model · thinking · tokens/context; fixed single line above the composer, never covers it
             StatusStrip(ui)
             if (pendingImagePayloads.isNotEmpty()) {
                 LazyRow(
@@ -711,7 +750,7 @@ private fun InputBar(viewModel: PiViewModel, ui: UiState) {
                             Box {
                                 androidx.compose.foundation.Image(
                                     bitmap = pendingImagePayloads[idx].thumbnail.asImageBitmap(),
-                                    contentDescription = "待发送图片 ${idx + 1}",
+                                    contentDescription = "Pending image ${idx + 1}",
                                     modifier = Modifier
                                         .size(64.dp)
                                         .background(
@@ -728,7 +767,7 @@ private fun InputBar(viewModel: PiViewModel, ui: UiState) {
                                         onClick = { pendingImagePayloads.removeAt(idx) },
                                         modifier = Modifier.size(20.dp),
                                     ) {
-                                        Icon(Icons.Filled.Close, "移除", tint = MaterialTheme.colorScheme.onErrorContainer, modifier = Modifier.size(14.dp))
+                                        Icon(Icons.Filled.Close, "Remove", tint = MaterialTheme.colorScheme.onErrorContainer, modifier = Modifier.size(14.dp))
                                     }
                                 }
                             }
@@ -741,45 +780,61 @@ private fun InputBar(viewModel: PiViewModel, ui: UiState) {
                     }
                 }
             }
+            val streaming = ui.state?.isStreaming == true
             Row(
                 Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 6.dp),
                 verticalAlignment = Alignment.Bottom,
             ) {
-            val streaming = ui.state?.isStreaming == true
-            IconButton(
-                onClick = { picker.launch("image/*") },
-                enabled = !preparing && pendingImagePayloads.size < 4,
-            ) {
-                if (preparing) CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp)
-                else Icon(Icons.Filled.Image, "添加图片")
-            }
-            OutlinedTextField(
-                value = text,
-                onValueChange = { text = it },
-                modifier = Modifier.weight(1f),
-                placeholder = { Text(if (streaming) "排队消息(follow-up)…" else "给 pi 发消息") },
-                maxLines = 5,
-            )
-            if (streaming) {
-                IconButton(onClick = { viewModel.abort() }) {
-                    Icon(Icons.Filled.Stop, "中止", tint = MaterialTheme.colorScheme.error)
+                IconButton(
+                    onClick = { picker.launch("image/*") },
+                    enabled = !preparing && pendingImagePayloads.size < 4,
+                ) {
+                    if (preparing) CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp)
+                    else Icon(Icons.Filled.Image, "Add image")
                 }
-            }
-            IconButton(
-                onClick = {
-                    val images = pendingImagePayloads.map { it.base64 to it.mimeType }
-                    if (images.isNotEmpty()) {
-                        val kb = images.sumOf { it.first.length } / 1024
-                        dev.pipilot.app.log.AppLog.i("InputBar", "sendPrompt with ${images.size} image(s), ~${kb}KB base64")
+                OutlinedTextField(
+                    value = text,
+                    onValueChange = { text = it },
+                    modifier = Modifier.weight(1f),
+                    placeholder = {
+                        Text(
+                            when {
+                                streaming -> "Steer or queue…"
+                                else -> "Message pi"
+                            },
+                        )
+                    },
+                    maxLines = 5,
+                )
+                if (streaming) {
+                    IconButton(onClick = { viewModel.abort() }) {
+                        Icon(Icons.Filled.Stop, "Abort and recall queue", tint = MaterialTheme.colorScheme.error)
                     }
-                    viewModel.sendPrompt(text, images)
-                    text = ""
-                    pendingImagePayloads.clear()
-                },
-                enabled = text.isNotBlank() || pendingImagePayloads.isNotEmpty(),
-            ) {
-                Icon(Icons.AutoMirrored.Filled.Send, "发送")
-            }
+                    TextButton(
+                        onClick = {
+                            viewModel.sendSteer(text, takeImages())
+                            afterSend()
+                        },
+                        enabled = canSend,
+                    ) { Text("Steer") }
+                    TextButton(
+                        onClick = {
+                            viewModel.sendFollowUp(text, takeImages())
+                            afterSend()
+                        },
+                        enabled = canSend,
+                    ) { Text("Queue") }
+                } else {
+                    IconButton(
+                        onClick = {
+                            viewModel.sendPrompt(text, takeImages())
+                            afterSend()
+                        },
+                        enabled = canSend,
+                    ) {
+                        Icon(Icons.AutoMirrored.Filled.Send, "Send")
+                    }
+                }
             }
         }
     }
@@ -789,10 +844,10 @@ private fun InputBar(viewModel: PiViewModel, ui: UiState) {
 private fun StatusStrip(ui: UiState) {
     val model = ui.state?.model
     val left = buildString {
-        append(model?.displayName ?: "未选择模型")
+        append(model?.displayName ?: "No model selected")
         ui.state?.thinkingLevel?.let { append(" · $it") }
     }
-    // 左:模型/thinking 可缩略;右:tokens/上下文固定宽度始终可见,避免数字一长把上下文挤出屏幕
+    // Left: model/thinking may ellipsize; right: tokens/context stay visible so a long number does not push context off-screen
     Row(
         modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp),
         verticalAlignment = Alignment.CenterVertically,
@@ -833,7 +888,7 @@ private fun SettingsSheet(settings: ConnectionSettings, viewModel: PiViewModel, 
                 .verticalScroll(rememberScrollState())
                 .padding(horizontal = 16.dp)
         ) {
-            Text("SSH 连接", style = MaterialTheme.typography.titleMedium)
+            Text("SSH connection", style = MaterialTheme.typography.titleMedium)
             Spacer(Modifier.size(8.dp))
             if (profiles.profiles.size > 1 || (profiles.profiles.size == 1 && profiles.profiles[0].name != profileName)) {
                 profiles.profiles.forEach { p ->
@@ -859,7 +914,7 @@ private fun SettingsSheet(settings: ConnectionSettings, viewModel: PiViewModel, 
                         }
                         if (!selected) {
                             TextButton(onClick = { viewModel.deleteProfile(p.name) }) {
-                                Text("删除", color = MaterialTheme.colorScheme.error)
+                                Text("Delete", color = MaterialTheme.colorScheme.error)
                             }
                         }
                     }
@@ -868,86 +923,86 @@ private fun SettingsSheet(settings: ConnectionSettings, viewModel: PiViewModel, 
             }
             OutlinedTextField(
                 value = profileName, onValueChange = { profileName = it },
-                label = { Text("主机名(保存为多主机配置)") },
+                label = { Text("Profile name (saved as multi-host config)") },
                 modifier = Modifier.fillMaxWidth(), singleLine = true,
             )
             Spacer(Modifier.size(8.dp))
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 OutlinedTextField(
                     value = draft.host, onValueChange = { draft = draft.copy(host = it) },
-                    label = { Text("主机") }, modifier = Modifier.weight(2f), singleLine = true,
+                    label = { Text("Host") }, modifier = Modifier.weight(2f), singleLine = true,
                 )
                 OutlinedTextField(
                     value = draft.port, onValueChange = { draft = draft.copy(port = it) },
-                    label = { Text("端口") }, modifier = Modifier.weight(1f), singleLine = true,
+                    label = { Text("Port") }, modifier = Modifier.weight(1f), singleLine = true,
                 )
             }
             OutlinedTextField(
                 value = draft.user, onValueChange = { draft = draft.copy(user = it) },
-                label = { Text("用户名") }, modifier = Modifier.fillMaxWidth(), singleLine = true,
+                label = { Text("Username") }, modifier = Modifier.fillMaxWidth(), singleLine = true,
             )
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                FilterChipSimple("密码", draft.authType == "password") { draft = draft.copy(authType = "password") }
-                FilterChipSimple("私钥", draft.authType == "key") { draft = draft.copy(authType = "key") }
+                FilterChipSimple("Password", draft.authType == "password") { draft = draft.copy(authType = "password") }
+                FilterChipSimple("Private key", draft.authType == "key") { draft = draft.copy(authType = "key") }
             }
             if (draft.authType == "password") {
                 OutlinedTextField(
                     value = draft.password, onValueChange = { draft = draft.copy(password = it) },
-                    label = { Text("密码") }, modifier = Modifier.fillMaxWidth(), singleLine = true,
+                    label = { Text("Password") }, modifier = Modifier.fillMaxWidth(), singleLine = true,
                     visualTransformation = PasswordVisualTransformation(),
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
                 )
             } else {
                 OutlinedTextField(
                     value = draft.privateKey, onValueChange = { draft = draft.copy(privateKey = it) },
-                    label = { Text("私钥(PEM 全文)") }, modifier = Modifier.fillMaxWidth(),
+                    label = { Text("Private key (full PEM)") }, modifier = Modifier.fillMaxWidth(),
                     minLines = 3,
                 )
                 OutlinedTextField(
                     value = draft.keyPassphrase, onValueChange = { draft = draft.copy(keyPassphrase = it) },
-                    label = { Text("私钥口令(可选)") }, modifier = Modifier.fillMaxWidth(), singleLine = true,
+                    label = { Text("Key passphrase (optional)") }, modifier = Modifier.fillMaxWidth(), singleLine = true,
                     visualTransformation = PasswordVisualTransformation(),
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
                 )
             }
             Spacer(Modifier.size(12.dp))
-            Text("pi 启动", style = MaterialTheme.typography.titleMedium)
+            Text("pi launch", style = MaterialTheme.typography.titleMedium)
             OutlinedTextField(
                 value = draft.piCommand, onValueChange = { draft = draft.copy(piCommand = it) },
-                label = { Text("启动命令") }, modifier = Modifier.fillMaxWidth(), singleLine = true,
+                label = { Text("Launch command") }, modifier = Modifier.fillMaxWidth(), singleLine = true,
             )
             OutlinedTextField(
                 value = draft.workDir, onValueChange = { draft = draft.copy(workDir = it) },
-                label = { Text("工作目录(可选)") }, modifier = Modifier.fillMaxWidth(), singleLine = true,
+                label = { Text("Working directory (optional)") }, modifier = Modifier.fillMaxWidth(), singleLine = true,
             )
             Spacer(Modifier.size(16.dp))
             Row(Modifier.padding(bottom = 24.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 Button(onClick = {
                     viewModel.saveProfile(profileName, draft)
                     onDismiss()
-                }) { Text("保存") }
+                }) { Text("Save") }
                 if (viewModel.ui.value.connected) {
                     OutlinedButton(onClick = {
                         viewModel.saveProfile(profileName, draft)
                         viewModel.disconnect()
                         onDismiss()
-                    }) { Text("保存并断开") }
+                    }) { Text("Save & disconnect") }
                 }
             }
             Spacer(Modifier.size(12.dp))
-            Text("后台保活", style = MaterialTheme.typography.titleMedium)
+            Text("Background keep-alive", style = MaterialTheme.typography.titleMedium)
             Spacer(Modifier.size(4.dp))
             Text(
-                "切到后台时短暂保持连接(约 10 分钟),并每 20 秒做一次应用级心跳。",
+                "Briefly keep the connection in the background (~10 minutes) with an app-level heartbeat every 20 seconds.",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
             Spacer(Modifier.size(4.dp))
             Text(
-                "vivo/小米/OPPO 等机型还会额外冻结后台网络,需要在系统里放行,否则只能靠回前台自动重连:\n" +
-                    "· 允许「忽略电池优化」\n" +
-                    "· 应用详情里打开「自启动 / 关联启动」\n" +
-                    "· 电池里选「允许后台运行 / 后台高耗电」(vivo OriginOS)",
+                "vivo/Xiaomi/OPPO also freeze background networking; allow these in system settings or rely on foreground reconnect:\n" +
+                    "· Allow Ignore battery optimization\n" +
+                    "· Enable Autostart / Associated start in app details\n" +
+                    "· Allow background running / high background power use (vivo OriginOS)",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
@@ -955,7 +1010,7 @@ private fun SettingsSheet(settings: ConnectionSettings, viewModel: PiViewModel, 
                 val ok = isIgnoringBatteryOptimizations(ctx)
                 Spacer(Modifier.size(4.dp))
                 Text(
-                    if (ok) "当前:已允许忽略电池优化 ✅" else "当前:未允许忽略电池优化 ⚠️ 后台容易被冻网",
+                    if (ok) "Status: battery optimization ignored ✅" else "Status: battery optimization still on ⚠️ background network may freeze",
                     style = MaterialTheme.typography.bodySmall,
                     color = if (ok) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error,
                 )
@@ -963,14 +1018,14 @@ private fun SettingsSheet(settings: ConnectionSettings, viewModel: PiViewModel, 
             Spacer(Modifier.size(8.dp))
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 OutlinedButton(onClick = { maybeRequestIgnoreBatteryOptimizations(ctx) }) {
-                    Text("忽略电池优化")
+                    Text("Ignore battery optimization")
                 }
                 OutlinedButton(onClick = { openAppDetailsSettings(ctx) }) {
-                    Text("应用详情")
+                    Text("App details")
                 }
             }
             Spacer(Modifier.size(8.dp))
-            Text("运行日志(报 bug 时复制发我)", style = MaterialTheme.typography.titleMedium)
+            Text("Runtime logs (copy when filing a bug)", style = MaterialTheme.typography.titleMedium)
             Spacer(Modifier.size(8.dp))
             LogPanel(viewModel)
             Spacer(Modifier.size(24.dp))
@@ -982,7 +1037,7 @@ private fun SettingsSheet(settings: ConnectionSettings, viewModel: PiViewModel, 
 private fun LogPanel(viewModel: PiViewModel) {
     val ui by viewModel.ui.collectAsState()
     var expanded by remember { mutableStateOf(false) }
-    // logSeq 变化即重读
+    // Re-read whenever logSeq changes
     val text = remember(ui.logSeq) { viewModel.getLogText() }
     val clipboard = androidx.compose.ui.platform.LocalClipboardManager.current
     val ctx = LocalContext.current
@@ -991,15 +1046,15 @@ private fun LogPanel(viewModel: PiViewModel) {
             OutlinedButton(onClick = {
                 viewModel.refreshLogView()
                 expanded = !expanded
-            }) { Text(if (expanded) "收起日志" else "查看日志") }
+            }) { Text(if (expanded) "Hide logs" else "View logs") }
             OutlinedButton(onClick = {
-                clipboard.setText(androidx.compose.ui.text.AnnotatedString(text.ifBlank { "(空)" }))
-            }) { Text("复制") }
+                clipboard.setText(androidx.compose.ui.text.AnnotatedString(text.ifBlank { "(empty)" }))
+            }) { Text("Copy") }
             OutlinedButton(onClick = {
-                // 落盘日志用系统分享发出:整文件不会被粘贴/附件截断,报 bug 时直接发这个
+                // Share the on-disk log via the system sheet: the whole file is not truncated by paste/attachments
                 val f = dev.pipilot.app.log.AppLog.logFile()
                 if (f == null || !f.exists() || f.length() == 0L) {
-                    android.widget.Toast.makeText(ctx, "还没有落盘日志", android.widget.Toast.LENGTH_SHORT).show()
+                    android.widget.Toast.makeText(ctx, "No on-disk log yet", android.widget.Toast.LENGTH_SHORT).show()
                     return@OutlinedButton
                 }
                 try {
@@ -1009,22 +1064,22 @@ private fun LogPanel(viewModel: PiViewModel) {
                     val intent = Intent(Intent.ACTION_SEND).apply {
                         type = "text/plain"
                         putExtra(Intent.EXTRA_STREAM, uri)
-                        putExtra(Intent.EXTRA_SUBJECT, "PiPilot 运行日志")
+                        putExtra(Intent.EXTRA_SUBJECT, "PiPilot runtime log")
                         addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
                     }
-                    ctx.startActivity(Intent.createChooser(intent, "分享日志文件"))
+                    ctx.startActivity(Intent.createChooser(intent, "Share log file"))
                     AppLog.i("KeepAlive", "shared log file ${f.length()}B")
                 } catch (e: Exception) {
-                    android.widget.Toast.makeText(ctx, "分享失败:${e.message}", android.widget.Toast.LENGTH_SHORT).show()
+                    android.widget.Toast.makeText(ctx, "Share failed: ${e.message}", android.widget.Toast.LENGTH_SHORT).show()
                 }
-            }) { Text("分享文件") }
-            TextButton(onClick = { viewModel.clearLog() }) { Text("清空") }
+            }) { Text("Share file") }
+            TextButton(onClick = { viewModel.clearLog() }) { Text("Clear") }
         }
         if (expanded) {
             Spacer(Modifier.size(8.dp))
             SelectionContainer {
                 Text(
-                    text.ifBlank { "(暂无日志)" },
+                    text.ifBlank { "(no logs yet)" },
                     style = MaterialTheme.typography.bodySmall,
                     fontFamily = FontFamily.Monospace,
                     fontSize = 10.sp,
@@ -1056,10 +1111,10 @@ private fun SessionsSheet(ui: UiState, viewModel: PiViewModel, onDismiss: () -> 
     var pendingDelete by remember { mutableStateOf<SessionEntryInfo?>(null) }
     ModalBottomSheet(onDismissRequest = onDismiss) {
         Column(Modifier.padding(horizontal = 16.dp)) {
-            Text("会话(session 文件)", style = MaterialTheme.typography.titleMedium)
+            Text("Sessions (session files)", style = MaterialTheme.typography.titleMedium)
             Spacer(Modifier.size(8.dp))
             Text(
-                "点按切换 · 长按删除",
+                "Tap to switch · long-press to delete",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
@@ -1071,19 +1126,19 @@ private fun SessionsSheet(ui: UiState, viewModel: PiViewModel, onDismiss: () -> 
                 ) {
                     CircularProgressIndicator(modifier = Modifier.size(20.dp), strokeWidth = 2.dp)
                     Spacer(Modifier.size(12.dp))
-                    Text("正在列出会话…", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text("Listing sessions…", color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
             } else if (ui.sessions.isEmpty()) {
                 Text(
-                    "在 ${ui.sessionsDir ?: "~/.pi/agent/sessions"} 下没有找到会话",
+                    "No sessions found under ${ui.sessionsDir ?: "~/.pi/agent/sessions"}",
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
             LazyColumn(contentPadding = androidx.compose.foundation.layout.PaddingValues(bottom = 32.dp)) {
                 items(ui.sessions, key = { it.path }) { s ->
-                    // 不能用 TextButton+combinedClickable 叠加:按钮内部自带 clickable,
-                    // 主分发内层先收到事件,长按松手被按钮当普通点击消费,onLongClick 永远不触发。
-                    // 普通 Text 只挂一个 combinedClickable,点按/长按才各自生效。
+                    // Do not stack TextButton + combinedClickable: the button already has clickable,
+                    // the inner dispatcher gets the event first, and a long-press release is eaten as a click so onLongClick never fires.
+                    // A plain Text with one combinedClickable lets tap and long-press both work.
                     Text(
                         text = s.name,
                         style = MaterialTheme.typography.bodyLarge,
@@ -1106,16 +1161,16 @@ private fun SessionsSheet(ui: UiState, viewModel: PiViewModel, onDismiss: () -> 
     pendingDelete?.let { target ->
         AlertDialog(
             onDismissRequest = { pendingDelete = null },
-            title = { Text("删除会话？") },
-            text = { Text("${target.name}\n\n将永久删除该 session 文件,不可恢复。") },
+            title = { Text("Delete session?") },
+            text = { Text("${target.name}\n\nThis permanently deletes the session file and cannot be undone.") },
             confirmButton = {
                 TextButton(onClick = {
                     viewModel.deleteSession(target.path)
                     pendingDelete = null
-                }) { Text("删除", color = MaterialTheme.colorScheme.error) }
+                }) { Text("Delete", color = MaterialTheme.colorScheme.error) }
             },
             dismissButton = {
-                TextButton(onClick = { pendingDelete = null }) { Text("取消") }
+                TextButton(onClick = { pendingDelete = null }) { Text("Cancel") }
             },
         )
     }
@@ -1126,12 +1181,12 @@ private fun RenameDialog(currentName: String, viewModel: PiViewModel, onDismiss:
     var input by remember { mutableStateOf(currentName) }
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("重命名会话") },
+        title = { Text("Rename session") },
         text = {
             OutlinedTextField(
                 value = input,
                 onValueChange = { input = it },
-                placeholder = { Text("留空则清除名称,显示文件名") },
+                placeholder = { Text("Leave blank to clear the name and show the file name") },
                 singleLine = true,
                 modifier = Modifier.fillMaxWidth(),
             )
@@ -1140,10 +1195,10 @@ private fun RenameDialog(currentName: String, viewModel: PiViewModel, onDismiss:
             TextButton(onClick = {
                 viewModel.setSessionName(input.trim())
                 onDismiss()
-            }) { Text("确定") }
+            }) { Text("OK") }
         },
         dismissButton = {
-            TextButton(onClick = onDismiss) { Text("取消") }
+            TextButton(onClick = onDismiss) { Text("Cancel") }
         },
     )
 }
@@ -1153,7 +1208,7 @@ private fun ExtensionDialog(d: UiDialog, onAnswer: (DialogAnswer) -> Unit) {
     var input by remember(d.id) { mutableStateOf(d.prefill ?: "") }
     AlertDialog(
         onDismissRequest = { onAnswer(DialogAnswer.Cancel) },
-        title = { Text(d.title.ifBlank { "pi 请求输入" }) },
+        title = { Text(d.title.ifBlank { "pi needs input" }) },
         text = {
             Column {
                 d.message?.let { Text(it) }
@@ -1179,27 +1234,27 @@ private fun ExtensionDialog(d: UiDialog, onAnswer: (DialogAnswer) -> Unit) {
         confirmButton = {
             when (d.method) {
                 "confirm" -> Row {
-                    TextButton(onClick = { onAnswer(DialogAnswer.Confirm(false)) }) { Text("否") }
-                    TextButton(onClick = { onAnswer(DialogAnswer.Confirm(true)) }) { Text("是") }
+                    TextButton(onClick = { onAnswer(DialogAnswer.Confirm(false)) }) { Text("No") }
+                    TextButton(onClick = { onAnswer(DialogAnswer.Confirm(true)) }) { Text("Yes") }
                 }
-                "input", "editor" -> TextButton(onClick = { onAnswer(DialogAnswer.Value(input)) }) { Text("确定") }
-                else -> TextButton(onClick = { onAnswer(DialogAnswer.Cancel) }) { Text("关闭") }
+                "input", "editor" -> TextButton(onClick = { onAnswer(DialogAnswer.Value(input)) }) { Text("OK") }
+                else -> TextButton(onClick = { onAnswer(DialogAnswer.Cancel) }) { Text("Close") }
             }
         },
         dismissButton = {
-            TextButton(onClick = { onAnswer(DialogAnswer.Cancel) }) { Text("取消") }
+            TextButton(onClick = { onAnswer(DialogAnswer.Cancel) }) { Text("Cancel") }
         },
     )
 }
 
-/** 是否已豁免电池优化(vivo/小米等机型切后台冻结网络的主要开关)。*/
+/** Whether battery optimization is ignored (main switch for vivo/Xiaomi freezing background networking). */
 private fun isIgnoringBatteryOptimizations(context: android.content.Context): Boolean {
     if (Build.VERSION.SDK_INT < 23) return true
     val pm = context.getSystemService(PowerManager::class.java) ?: return true
     return runCatching { pm.isIgnoringBatteryOptimizations(context.packageName) }.getOrDefault(true)
 }
 
-/** 连上后请求忽略电池优化;OEM 不豁免时后台网络常被冻死。失败只记日志,不影响主流程。 */
+/** After connect, request ignore-battery-optimization; without it OEMs often freeze background networking. Failures are logged only. */
 private fun maybeRequestIgnoreBatteryOptimizations(context: android.content.Context) {
     if (Build.VERSION.SDK_INT < 23) return
     val pm = context.getSystemService(PowerManager::class.java) ?: return
@@ -1220,7 +1275,7 @@ private fun maybeRequestIgnoreBatteryOptimizations(context: android.content.Cont
     }
 }
 
-/** 打开系统「应用详情」页:vivo/小米的「自启动/关联启动/后台运行」开关都在这一页。*/
+/** Open the system App details page: vivo/Xiaomi autostart / associated start / background running switches live there. */
 private fun openAppDetailsSettings(context: android.content.Context) {
     try {
         val intent = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {

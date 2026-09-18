@@ -1,7 +1,7 @@
 # sshj / bouncycastle
 -dontwarn org.bouncycastle.**
 -dontwarn org.slf4j.**
-# sshj 的 AuthGssApiWithMic 引用 JGSS(Android 无此类,该认证方式在移动端也不会走到)
+# sshj AuthGssApiWithMic references JGSS (absent on Android; this auth path is never used on mobile)
 -dontwarn org.ietf.jgss.**
 -dontwarn javax.security.auth.login.**
 -keep class net.schmizz.sshj.** { *; }

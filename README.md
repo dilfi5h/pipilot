@@ -1,97 +1,106 @@
-# PiPilot — 手机遥控 pi.dev 的 Android 客户端
+# PiPilot — Android client for remote-controlling pi.dev
 
-PiPilot 是一个原生 Android(Kotlin + Jetpack Compose)应用,通过 SSH 在你的开发机/服务器上启动
-[pi coding agent](https://pi.dev) 的 RPC 模式(`pi --mode rpc`),把 TUI 里的对话、工具执行、
-模型切换、会话管理搬到手机上。
+PiPilot is a native Android (Kotlin + Jetpack Compose) app that SSHs into your
+dev machine/server, starts [pi coding agent](https://pi.dev) in RPC mode
+(`pi --mode rpc`), and brings the TUI conversation, tool runs, model switching,
+and session management onto your phone.
 
-## 下载 APK
+## Download APK
 
-**方式一(推荐):GitHub Releases** — 推送 `v*` tag 时 CI 自动打包并发布:
+**Option 1 (recommended): GitHub Releases** — pushing a `v*` tag makes CI build and publish:
 
-- 最新 release:https://github.com/dilfi5h/pipilot/releases/latest
-- 或本仓库 Releases 页下载 `PiPilot-vX.Y.Z-debug.apk`
+- Latest release: https://github.com/dilfi5h/pipilot/releases/latest
+- Or download `PiPilot-vX.Y.Z-debug.apk` from this repo's Releases page
 
-**方式二:Actions artifact** — 任意 commit 可在
-[Actions → Build & Release APK](https://github.com/dilfi5h/pipilot/actions/workflows/release.yml) 的 artifact 里取 APK。
+**Option 2: Actions artifact** — any commit can provide an APK under
+[Actions → Build & Release APK](https://github.com/dilfi5h/pipilot/actions/workflows/release.yml).
 
-**方式三:本地构建**(JDK 17 + Android SDK 35 + Gradle 8.9):
+**Option 3: Local build** (JDK 17 + Android SDK 35 + Gradle 8.9):
 
 ```bash
-gradle assembleDebug   # 或 ./gradlew 若仓库含 wrapper
-# 产物:app/build/outputs/apk/debug/app-debug.apk
+gradle assembleDebug   # or ./gradlew if the repo has a wrapper
+# Output: app/build/outputs/apk/debug/app-debug.apk
 ```
 
-## 工作原理
+## How it works
 
 ```
 ┌─────────────┐   SSH (sshj)    ┌──────────────────────────┐
 │  PiPilot    │ ── exec ──────▶ │  pi --mode rpc           │
-│  (Android)  │ ◀─ stdout ───── │  (JSONL 事件流 / 响应)     │
+│  (Android)  │ ◀─ stdout ───── │  (JSONL event / response)│
 └─────────────┘   stdin ──────▶ └──────────────────────────┘
 ```
 
-- App 用 [sshj](https://github.com/hierynomus/sshj) 建立 SSH 连接,`exec` 启动 `pi --mode rpc`
-- RPC 协议:严格 JSONL(仅 `\n` 分帧),命令写入 stdin,`response` + 事件流读自 stdout
-- 协议文档:[`docs/rpc.md`](docs/rpc.md)(自 pi 仓库同步)
+- The app opens an SSH connection with [sshj](https://github.com/hierynomus/sshj) and `exec`s `pi --mode rpc`
+- RPC protocol: strict JSONL (frame on `\n` only); commands on stdin; `response` + events on stdout
+- Protocol docs: [`docs/rpc.md`](docs/rpc.md) (synced from the pi repo)
 
-## 文档
+## Docs
 
-- **[设计文档](docs/DESIGN.md)** — 架构决策、协议实现要点(JSONL 分帧、流式拼装、
-  请求-响应关联)、SSH 层、安全考量与 Roadmap
-- **[RPC 协议参考](docs/rpc.md)** — pi 官方 RPC 模式文档全文(命令/事件/扩展 UI 子协议)
+- **[Design notes](docs/DESIGN.md)** — architecture decisions, protocol implementation notes (JSONL framing, streaming assembly, request/response correlation), SSH layer, security, and roadmap
+- **[RPC protocol reference](docs/rpc.md)** — full upstream pi RPC-mode docs (commands / events / extension UI sub-protocol)
 
-## 功能(MVP)
+## Features (MVP)
 
-- **核心对话**:发 prompt、流式接收回复(text_delta 拼装)、abort 中止、
-  流式中发送自动走 follow-up 排队、queue_update 展示排队消息
-- **工具执行可视化**:tool_execution_start/update/end 渲染成工具卡片,实时显示
-  bash/read/write 等工具的参数与累计输出;直接 `bash` 命令输出也有终端风格卡片
-- **模型切换**:get_available_models 列表 + set_model;thinking level 调节(set_thinking_level)
-- **会话管理**:新建会话(new_session)、列出远端 `~/.pi/agent/sessions/*.jsonl` 并切换
-  (switch_session)、加载历史(get_entries)、会话统计(get_session_stats:tokens/上下文占用)
-- **图片附件**:输入框选图,压缩为 JPEG 后随 prompt.images 发送
-- **多主机配置**:设置页保存/切换命名主机
-- **后台保活**:切后台约 10 分钟 FGS + WakeLock/WifiLock;应用级 get_state 心跳(后台 20s / 前台 60s);断线指数退避重连,并用 `--session` 恢复原会话
-- **扩展 UI 桥接**:pi 扩展弹出的 select/confirm/input 对话框(extension_ui_request)
-  映射为 Android 原生 AlertDialog,回答通过 extension_ui_response 回传
+- **Core chat**: send prompts, stream replies (`text_delta` assembly), abort
+  (clear_queue then abort; queue text is restored into the composer), while streaming
+  you can steer (after current tools) or queue a follow-up (after the agent settles);
+  `queue_update` shows pending deliveries
+- **Tool visualization**: `tool_execution_start/update/end` as tool cards with live
+  args and cumulative output for bash/read/write; direct `bash` command output also
+  gets a terminal-style card
+- **Model switching**: `get_available_models` list + `set_model`; thinking level via `set_thinking_level`
+- **Sessions**: `new_session`, list remote `~/.pi/agent/sessions/*.jsonl` and switch
+  (`switch_session`), load history (`get_entries`), session stats
+  (`get_session_stats`: tokens / context usage)
+- **Image attachments**: pick images in the composer, compress to JPEG, send with `prompt.images`
+- **Multi-host profiles**: save/switch named hosts in Settings
+- **Background keep-alive**: short FGS + WakeLock/WifiLock (~10 min) when backgrounded;
+  app-level `get_state` heartbeat (20s background / 60s foreground); exponential-backoff
+  reconnect that resumes the session with `--session`
+- **Extension UI bridge**: pi extension `select/confirm/input` dialogs
+  (`extension_ui_request`) map to native Android `AlertDialog`; answers return via
+  `extension_ui_response`
 
-## 使用
+## Usage
 
-1. 在手机上安装 APK,打开 ⚙ 设置:
-   - **主机 / 端口 / 用户名**:你的开发机 SSH 信息
-   - **认证**:密码,或 PEM 私钥(支持口令)
-   - **启动命令**:默认 `pi --mode rpc`;可加 `--provider` / `--model` / `--no-session` 等
-   - **工作目录**:pi 启动前 `cd` 到的目录(项目根目录)
-2. 点"连接"。连接成功后历史消息自动加载。
-3. 输入框发消息;agent 流式执行时输入框自动变为"排队(follow-up)模式",
-   ⏹ 按钮发送 abort;顶部菜单切换模型 / thinking level / 会话。
+1. Install the APK and open ⚙ Settings:
+   - **Host / port / username**: SSH details for your machine
+   - **Auth**: password, or PEM private key (passphrase supported)
+   - **Launch command**: default `pi --mode rpc`; you can add `--provider` / `--model` / `--no-session`, etc.
+   - **Working directory**: directory to `cd` into before starting pi (project root)
+2. Tap Connect. History loads automatically after a successful connect.
+3. Type in the composer. While the agent is streaming, send splits into **Steer**
+   (takes effect after current tools) and **Queue** (after the whole run finishes);
+   ⏹ recalls the queue then aborts. Use the top menu for model / thinking level / sessions.
 
-## 远端机要求
+## Remote machine requirements
 
 ```bash
-# pi 已安装且在 PATH 中(npm i -g @earendil-works/pi-coding-agent)
+# pi installed and on PATH (npm i -g @earendil-works/pi-coding-agent)
 pi --version
-# 会话目录存在(用过一次 pi 就有)
+# Session directory exists (created after using pi once)
 ls ~/.pi/agent/sessions/
 ```
 
-注意:RPC 模式不继承 TUI 的终端渲染,但扩展、skills、prompt 模板全部可用;
-TUI 专属命令(如 `/settings`)在 RPC 模式下不生效。
+Note: RPC mode does not inherit TUI terminal rendering, but extensions, skills, and
+prompt templates all work. TUI-only commands (e.g. `/settings`) do not run in RPC mode.
 
-## 安全说明
+## Security
 
-- 当前版本 SSH host key 校验使用 `PromiscuousVerifier`(信任所有主机),适合个人内网,
-  公网使用建议后续在设置里加 host key 固定(fingerprint 校验)
-- 密码/私钥存储在本机 Datastore(私有目录),不上传;APK 未启用 backup
+- This build verifies SSH host keys with `PromiscuousVerifier` (trust all hosts). Fine
+  for a personal LAN; for public internet use, pin a host-key fingerprint in settings later
+- Password / private key live in the app's private DataStore and are never uploaded;
+  APK backup is disabled
 
-## 已知限制 / Roadmap
+## Known limits / Roadmap
 
-- [x] 图片附件(prompt 的 images 字段)
-- [x] 多主机配置
-- [x] 通知栏短时保活 + 断线自动重连
-- [x] `get_entries` 历史同步(重连全量重建,避免直播消息重复)
-- [ ] 流式中 turn 结束后 `live` 气泡与最终气泡的去重细调
-- [ ] 会话树(/tree)、fork/clone
-- [ ] export_html 并在手机上预览
-- [ ] Host key 固定(FingerprintVerifier)、SSH agent 转发
-- [ ] 凭据加密存储(当前 DataStore 明文,仅 `allowBackup=false`)
+- [x] Image attachments (`prompt.images`)
+- [x] Multi-host profiles
+- [x] Short notification keep-alive + automatic reconnect
+- [x] `get_entries` history sync (full rebuild on reconnect, avoid live-message duplicates)
+- [ ] Fine-tune live vs final bubble dedup after a streaming turn
+- [ ] Session tree (`/tree`), fork/clone
+- [ ] `export_html` with on-phone preview
+- [ ] Host-key pinning (`FingerprintVerifier`), SSH agent forwarding
+- [ ] Encrypted credential storage (DataStore is plaintext today; only `allowBackup=false`)

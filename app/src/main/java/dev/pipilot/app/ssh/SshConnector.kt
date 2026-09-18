@@ -21,13 +21,13 @@ import java.io.OutputStream
 import java.security.Security
 import java.util.concurrent.TimeUnit
 
-/** 一条已建立并启动远端命令的 exec 通道。*/
+/** An established exec channel with a remote command already started. */
 class SshExecSession(
     val stdin: OutputStream,
     val stdout: InputStream,
     val stderr: InputStream,
     val session: Session,
-    /** 远端命令句柄:join() 可等待退出、exitStatus 拿退出码(诊断"命令启动即退")。*/
+    /** Remote command handle: join() waits for exit; exitStatus is the code (diagnose "command exited on start"). */
     val command: Session.Command,
     private val client: SSHClient,
 ) {
@@ -52,7 +52,7 @@ data class SshConfig(
 object SshConnector {
 
     init {
-        // sshj 依赖 BouncyCastle 做 PKCS8/Ed25519;Android 自带的 BC 是裁剪版,需要注册完整版
+        // sshj needs BouncyCastle for PKCS8/Ed25519; Android's built-in BC is trimmed, so register the full provider
         runCatching {
             Security.removeProvider("BC")
             Security.addProvider(org.bouncycastle.jce.provider.BouncyCastleProvider())
@@ -62,14 +62,15 @@ object SshConnector {
     private const val TAG = "SshConnector"
 
     /**
-     * 连接并在远端执行 [command],返回挂起的 exec 会话。
-     * 注意:host key 校验用 PromiscuousVerifier(信任所有)。移动端对个人服务器场景常见,
-     * 但严格来说允许 MITM;后续版本可在设置里固定 host key。
+     * Connect and run [command] remotely; return a hanging exec session.
+     * Host-key checks use PromiscuousVerifier (trust all). Common for a personal
+     * server from a phone, but it allows MITM; a later version can pin the host key in settings.
      *
-     * [readTimeoutMs] 是底层 socket 读超时(SO_TIMEOUT),0 = 不超时:
-     * - 长连接 RPC 用默认 0:空闲读不能被杀,否则心跳还没发出就被掐断;
-     * - 短命令(runQuick)必须传实际超时,否则远端命令挂住时 readBytes() 永久阻塞
-     *   (协程取消对阻塞 IO 无效,只有 socket 超时真的能中断)。
+     * [readTimeoutMs] is the socket read timeout (SO_TIMEOUT); 0 = no timeout:
+     * - long-lived RPC uses the default 0: an idle read must not die before the heartbeat is sent;
+     * - short commands (runQuick) must pass a real timeout, otherwise a hung remote command
+     *   blocks forever in readBytes() (coroutine cancel does not interrupt blocking IO;
+     *   only a socket timeout actually aborts it).
      */
     suspend fun connectAndExec(
         config: SshConfig,
@@ -77,16 +78,16 @@ object SshConnector {
         readTimeoutMs: Long = 0,
     ): SshExecSession =
         withContext(Dispatchers.IO) {
-            // KEEP_ALIVE = OpenSSH keepalive@openssh.com(要回复);默认 HEARTBEAT 只发 IGNORE,NAT/OEM 下不够
+            // KEEP_ALIVE = OpenSSH keepalive@openssh.com (requires a reply); default HEARTBEAT only sends IGNORE, which is not enough under NAT/OEM
             val sshConfig = DefaultConfig().apply {
                 keepAliveProvider = KeepAliveProvider.KEEP_ALIVE
             }
             val client = SSHClient(sshConfig)
-            // 连接阶段超时;读超时按调用方给(0 = 禁用 SO_TIMEOUT,供长连接空闲等待)
+            // Connect-phase timeout; read timeout comes from the caller (0 = disable SO_TIMEOUT for idle long-lived waits)
             client.connectTimeout = 15_000
             client.timeout = readTimeoutMs.toInt()
-            // SSH 应用层心跳(秒)。心跳全程生效,30s 足够防 NAT/空闲断连且不至于常驻耗电;
-            // 回前台另有 get_state 探活兜底
+            // SSH application-layer heartbeat (seconds). Active for the whole session; 30s is enough
+            // against NAT/idle drops without constant battery drain. Foreground also probes with get_state.
             client.connection.keepAlive.keepAliveInterval = 30
             (client.connection.keepAlive as? KeepAliveRunner)?.maxAliveCount = 3
             client.addHostKeyVerifier(PromiscuousVerifier())
@@ -115,18 +116,18 @@ object SshConnector {
             } catch (e: Exception) {
                 AppLog.e(TAG, "connect/exec failed: ${e.javaClass.simpleName}: ${e.message}")
                 runCatching { client.disconnect() }
-                throw SshException("SSH 连接失败: ${e.message}", e)
+                throw SshException("SSH connect failed: ${e.message}", e)
             }
         }
 
     /**
-     * 用 sshj 官方格式探测(KeyProviderUtil)选择解析器:
-     * - `OPENSSH PRIVATE KEY`(ssh-keygen 新格式,含 ed25519) → OpenSSHv1
-     *   (com.hierynomus…OpenSSHKeyV1KeyFile;注意 net.schmizz…OpenSSHKeyFile
-     *   只是 PKCS8+独立公钥的壳,解析不了这种格式)
-     * - `PRIVATE KEY` / `ENCRYPTED PRIVATE KEY`(PKCS#8) → PKCS8(或 OpenSSH 壳)
-     * 口令统一透传,无口令传 null。探测/解析失败抛 SshException,
-     * 认证不会被静默跳过(避免含糊的 exhausted 错误)。
+     * Pick a parser via sshj's official format probe (KeyProviderUtil):
+     * - `OPENSSH PRIVATE KEY` (new ssh-keygen format, including ed25519) → OpenSSHv1
+     *   (com.hierynomus…OpenSSHKeyV1KeyFile; note that net.schmizz…OpenSSHKeyFile
+     *   is only a PKCS8 + separate-public-key shell and cannot parse this format)
+     * - `PRIVATE KEY` / `ENCRYPTED PRIVATE KEY` (PKCS#8) → PKCS8 (or the OpenSSH shell)
+     * Passphrases are forwarded; null if none. Probe/parse failures throw SshException
+     * so auth is never skipped silently (avoids a vague "exhausted" error).
      */
     private fun loadPrivateKey(pem: String, passphrase: String?): FileKeyProvider {
         val finder = passphrase?.let { pw ->
@@ -140,23 +141,23 @@ object SshConnector {
             KeyProviderUtil.detectKeyFileFormat(trimmed, false)
         } catch (e: Exception) {
             AppLog.e(TAG, "key probe/parse failed: ${e.javaClass.simpleName}: ${e.message}")
-            throw SshException("私钥格式无法识别: ${e.message}", e)
+            throw SshException("Unrecognized private-key format: ${e.message}", e)
         }
         val provider = keyProviderFor(format, trimmed, finder)
         try {
-            provider.private // 触发实际解析,格式不对这里就抛
+            provider.private // force actual parse; wrong format throws here
             AppLog.d(TAG, "key parsed ok (format=$format)")
         } catch (e: Exception) {
             AppLog.e(TAG, "key parse failed (format=$format): ${e.javaClass.simpleName}: ${e.message}")
-            throw SshException("私钥解析失败(${format}): ${e.message}", e)
+            throw SshException("Private-key parse failed ($format): ${e.message}", e)
         }
         return provider
     }
 
     /**
-     * 按探测到的格式建解析器。OpenSSHv1 用 com.hierynomus 包下的
-     * OpenSSHKeyV1KeyFile(字符串类名反射,避免编译期依赖内部包);
-     * 其余走 net.schmizz 的 PKCS8/OpenSSH 壳。
+     * Build a parser for the probed format. OpenSSHv1 uses OpenSSHKeyV1KeyFile
+     * in the com.hierynomus package (reflected by class name to avoid a compile-time
+     * dependency on an internal package); everything else uses net.schmizz PKCS8/OpenSSH shells.
      */
     private fun keyProviderFor(format: KeyFormat, pem: String, finder: PasswordFinder?): FileKeyProvider {
         val provider: FileKeyProvider = when (format) {
@@ -164,18 +165,18 @@ object SshConnector {
                 Class.forName("com.hierynomus.sshj.userauth.keyprovider.OpenSSHKeyV1KeyFile")
                     .getDeclaredConstructor().newInstance() as FileKeyProvider
             } catch (e: Exception) {
-                throw SshException("缺少 OpenSSHv1 解析器: ${e.message}", e)
+                throw SshException("Missing OpenSSHv1 parser: ${e.message}", e)
             }
             KeyFormat.OpenSSH -> OpenSSHKeyFile()
             KeyFormat.PKCS8 -> PKCS8KeyFile()
-            else -> throw SshException("不支持的私钥格式: $format")
+            else -> throw SshException("Unsupported private-key format: $format")
         }
         if (finder != null) provider.init(java.io.StringReader(pem), finder)
         else provider.init(java.io.StringReader(pem))
         return provider
     }
 
-    /** 便捷:执行短命令并拿到完整输出(用于探测 pi 是否安装、列 session 目录等)。*/
+    /** Convenience: run a short command and return full output (probe whether pi is installed, list session dir, etc.). */
     suspend fun runQuick(config: SshConfig, command: String, timeoutMs: Long = 15_000): String =
         withContext(Dispatchers.IO) {
             connectAndExec(config, command, readTimeoutMs = timeoutMs).let { s ->

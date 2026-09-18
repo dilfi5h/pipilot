@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
 <paths>
-    <!-- 日志分享:只暴露 filesDir/logs/,不要把 datastore/ 凭据一起授权出去。 -->
+    <!-- Log sharing: expose only filesDir/logs/, never grant datastore/ credentials. -->
     <files-path name="app_log" path="logs/" />
 </paths>

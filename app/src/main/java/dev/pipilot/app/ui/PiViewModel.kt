@@ -45,9 +45,11 @@ import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
+import dev.pipilot.app.rpc.joinQueueDraft
 import dev.pipilot.app.rpc.str
+import dev.pipilot.app.rpc.stringList
 
-/** 扩展弹出的 UI 请求(select/confirm/input),转成 Android 对话框。*/
+/** Extension UI request (select/confirm/input), mapped to an Android dialog. */
 data class UiDialog(
     val id: String,
     val method: String,
@@ -65,7 +67,7 @@ data class SessionEntryInfo(
 )
 
 data class UiState(
-    val connectionLabel: String = "未连接",
+    val connectionLabel: String = "Disconnected",
     val connected: Boolean = false,
     val connecting: Boolean = false,
     val reconnecting: Boolean = false,
@@ -82,6 +84,8 @@ data class UiState(
     val sessionsDir: String? = null,
     val queueSteering: List<String> = emptyList(),
     val queueFollowUp: List<String> = emptyList(),
+    /** abort/clear_queue restore unsent queue text into the composer; UI should call consumeRestoreDraft after applying. */
+    val restoreDraft: String? = null,
     val dialog: UiDialog? = null,
     val statsText: String? = null,
 )
@@ -96,7 +100,7 @@ class PiViewModel(app: Application) : AndroidViewModel(app) {
     val profiles: StateFlow<HostProfilesState> =
         hostProfiles.state.stateIn(viewModelScope, SharingStarted.Eagerly, HostProfilesState())
 
-    /** 当前生效的连接配置:多主机选中项,回退到老单配置。 */
+    /** Active connection settings: selected multi-host profile, falling back to the legacy single config. */
     val activeSettings: StateFlow<ConnectionSettings> = kotlinx.coroutines.flow.combine(
         profiles, settings,
     ) { p, legacy -> p.active.takeIf { it.isValid } ?: legacy }
@@ -105,15 +109,15 @@ class PiViewModel(app: Application) : AndroidViewModel(app) {
     private val _ui = MutableStateFlow(UiState())
     val ui: StateFlow<UiState> = _ui.asStateFlow()
 
-    // ---------- 网络变化 & 应用级心跳 ----------
+    // ---------- Network changes & app-level heartbeat ----------
 
-    /** 默认网络回调:换网/断网时 Android 会悄悄废掉 socket,不等 readLoop 报错就该知情。*/
+    /** Default network callback: Android silently kills the socket on network change/loss, so learn before readLoop errors. */
     private val connectivity: ConnectivityManager? =
         app.getSystemService(ConnectivityManager::class.java)
     private var heartbeatJob: Job? = null
     private var observeJobs: List<Job> = emptyList()
 
-    /** 是否在后台(由 PiScreen 生命周期维护):后台心跳加密,前台放宽省电。*/
+    /** Backgrounded flag (owned by PiScreen lifecycle): tighten heartbeat in background, relax in foreground to save power. */
     @Volatile private var backgrounded = false
 
     private val networkCallback = object : ConnectivityManager.NetworkCallback() {
@@ -121,11 +125,11 @@ class PiViewModel(app: Application) : AndroidViewModel(app) {
             when {
                 _ui.value.reconnecting -> {
                     AppLog.i(TAG, "network available -> reconnect now")
-                    reconnectNow("网络已恢复")
+                    reconnectNow("network restored")
                 }
                 _ui.value.connected -> {
                     AppLog.i(TAG, "network available -> probe")
-                    probeAndMaybeReconnect("网络已恢复")
+                    probeAndMaybeReconnect("network restored")
                 }
                 else -> AppLog.i(TAG, "network available (idle)")
             }
@@ -133,8 +137,8 @@ class PiViewModel(app: Application) : AndroidViewModel(app) {
 
         override fun onLost(network: Network) {
             AppLog.w(TAG, "network lost (connected=${_ui.value.connected}, reconnecting=${_ui.value.reconnecting})")
-            // 这条 socket 已随网络一起死:立刻拆掉,别等 readLoop/心跳超时
-            if (!userDisconnect && _ui.value.connected) forceReconnect("网络断开")
+            // This socket died with the network: tear it down now; do not wait for readLoop/heartbeat timeout
+            if (!userDisconnect && _ui.value.connected) forceReconnect("network lost")
         }
 
         override fun onCapabilitiesChanged(network: Network, caps: NetworkCapabilities) {
@@ -156,32 +160,32 @@ class PiViewModel(app: Application) : AndroidViewModel(app) {
     private var client: PiRpcClient? = null
     private val reducer = StreamReducer()
 
-    // 最近一次已连接会话的 session 文件;重连成功后用 `pi --mode rpc --session <path>` 恢复,
-    // 避免"断了丢现场"(新起的 pi 进程默认是空会话)
+    // Last connected session file; after a successful reconnect resume with `pi --mode rpc --session <path>`
+    // so we do not lose context (a fresh pi process starts an empty session)
     private var lastSessionFile: String? = null
-    /** 当前会话已同步到的最后一个 append-only entry id。*/
+    /** Last append-only entry id synced for the current session. */
     private var lastEntryId: String? = null
 
-    /** 本地维护的流式状态:get_state 快照会滞后,agent_start/end 才是即时信号。*/
+    /** Local streaming flag: get_state snapshots lag; agent_start/end are the live signals. */
     @Volatile private var locallyStreaming = false
 
-    // 重连控制:connectEpoch 隔离过期循环,userDisconnect 标记手动断开
+    // Reconnect control: connectEpoch isolates stale loops; userDisconnect marks a manual disconnect
     private var connectEpoch = 0
     @Volatile private var userDisconnect = false
     private var reconnectJob: Job? = null
-    /** 最近一次成功建连的时刻;用于识别"连上即退"的启动失败(不进重连循环)。*/
+    /** Time of the last successful connect; used to detect "exited right after connect" (skip reconnect loop). */
     private var connectedAtMs = 0L
 
     fun saveSettings(s: ConnectionSettings) {
         viewModelScope.launch { settingsStore.save(s) }
     }
 
-    /** 保存当前编辑的主机配置(新建或覆盖同名),并设为当前选中。 */
+    /** Save the host profile being edited (create or overwrite same name) and select it. */
     fun saveProfile(name: String, s: ConnectionSettings) {
         val profileName = name.trim().ifBlank { "default" }
         viewModelScope.launch {
             hostProfiles.saveProfile(profileName, s)
-            // 老单配置同步一份,保持旧读取路径可用
+            // Also sync the legacy single config so the old read path still works
             settingsStore.save(s)
         }
     }
@@ -202,10 +206,10 @@ class PiViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     /**
-     * 一次连接尝试。成功返回 true。
-     * @param epoch 所属连接代次;重连与手动 connect 各占一代,过期尝试的结果会被丢弃。
-     * @param resetItems 成功后是否清空聊天列表(手动连接清空,重连也清空后由 loadHistory 全量重建,
-     *   避免增量同步把直播渲染过的消息再 append 一遍)。
+     * One connect attempt. Returns true on success.
+     * @param epoch generation for this attempt; reconnect and manual connect each take a generation; stale results are dropped.
+     * @param resetItems whether to clear the chat list on success (manual connect clears; reconnect also clears then loadHistory rebuilds fully,
+     *   so incremental sync does not append live-rendered messages again).
      */
     private suspend fun attemptConnect(epoch: Int, resetItems: Boolean = true): Boolean {
         val s = activeSettings.value
@@ -217,21 +221,21 @@ class PiViewModel(app: Application) : AndroidViewModel(app) {
         }
         return try {
             val cd = if (s.workDir.isNotBlank()) "cd ${shellQuote(s.workDir)} && " else ""
-            // 重连(resetItems=false)时带上次会话路径启动,恢复原会话;手动连接总是全新会话
+            // On reconnect (resetItems=false) start with the last session path to resume; manual connect always starts fresh
             val resumeArg = if (!resetItems) lastSessionFile?.let { " --session ${shellQuote(it)}" } ?: "" else ""
             val exec = SshConnector.connectAndExec(
                 SshConfig(s.host, s.port.toIntOrNull() ?: 22, s.user, auth),
                 "${cd}${s.piCommand}$resumeArg",
             )
             if (epoch != connectEpoch) {
-                // 已过期:关掉刚建好的连接,结果作废
+                // Stale: close the just-built connection and discard it
                 runCatching { exec.close() }
                 return false
             }
             ssh = exec
             val rpc = PiRpcClient(
                 exec.stdin, exec.stdout, exec.stderr,
-                // 阻塞等远端命令退出:pi 常驻时不返回;启动即退(没装 pi 等)时拿到 exit 码做诊断
+                // Block for remote exit: a resident pi never returns; an immediate exit (pi missing, etc.) yields an exit code for diagnosis
                 remoteExit = {
                     runCatching { exec.command.join() }
                     runCatching { exec.command.exitStatus }.getOrNull()
@@ -241,17 +245,19 @@ class PiViewModel(app: Application) : AndroidViewModel(app) {
             try {
                 rpc.start()
                 observeClient(rpc, epoch)
-                // 应用级心跳:SSH 传输层的心跳只能证明 SSH 活着,证明不了这个 socket 还有下行;
-                // 后台被系统收走网络时,readLoop 可能既不报错也不返回,必须自己打探
+                // App-level heartbeat: SSH transport keepalive only proves SSH is alive, not that this socket still has inbound traffic;
+                // when the OS reclaims the network in the background, readLoop may neither error nor return, so we must probe ourselves
                 restartHeartbeat()
                 connectedAtMs = System.currentTimeMillis()
-                // 重连也全量重建:直播消息不推进游标,增量同步会把已上屏的消息重复 append
+                // Reconnect also rebuilds fully: live messages do not advance the cursor, so incremental sync would append already-shown messages again
                 if (!resetItems) lastEntryId = null
                 _ui.value = _ui.value.copy(
                     connected = true, connecting = false,
                     reconnecting = false, reconnectAttempt = 0, reconnectCountdown = 0,
-                    connectionLabel = "已连接",
+                    connectionLabel = "Connected",
                     items = emptyList(),
+                    queueSteering = emptyList(),
+                    queueFollowUp = emptyList(),
                 )
                 refreshAll()
                 AppLog.i(TAG, "connect ok${if (!resetItems) " (resumed $lastSessionFile)" else ""}")
@@ -267,7 +273,7 @@ class PiViewModel(app: Application) : AndroidViewModel(app) {
             AppLog.e(TAG, "connect attempt failed: ${e.javaClass.simpleName}: ${e.message}")
             Log.e(TAG, "connect failed", e)
             if (epoch == connectEpoch && !userDisconnect && _ui.value.reconnecting) {
-                // 重连中的失败不弹 error:倒计时横幅已说明情况,避免每次重试都弹 Snackbar
+                // Failures during reconnect do not set error: the countdown banner already explains it, avoid a Snackbar on every retry
             } else if (epoch == connectEpoch) {
                 _ui.value = _ui.value.copy(error = e.message)
             }
@@ -284,17 +290,17 @@ class PiViewModel(app: Application) : AndroidViewModel(app) {
                 connecting = true, error = null,
                 reconnecting = false, reconnectAttempt = 0, reconnectCountdown = 0,
                 items = if (resetItems) emptyList() else _ui.value.items,
-                connectionLabel = "连接中…",
+                connectionLabel = "Connecting…",
             )
             val ok = attemptConnect(epoch, resetItems = resetItems)
             if (!ok && epoch == connectEpoch) {
-                _ui.value = _ui.value.copy(connected = false, connecting = false, connectionLabel = "未连接")
+                _ui.value = _ui.value.copy(connected = false, connecting = false, connectionLabel = "Disconnected")
             }
         }
     }
 
     fun disconnect() {
-        // 手动断开:新开一代,让正在进行的连接/重连全部过期作废
+        // Manual disconnect: bump the generation so in-flight connect/reconnect attempts become stale
         connectEpoch++
         userDisconnect = true
         reconnectJob?.cancel()
@@ -304,17 +310,18 @@ class PiViewModel(app: Application) : AndroidViewModel(app) {
             _ui.value = _ui.value.copy(
                 connected = false, connecting = false,
                 reconnecting = false, reconnectAttempt = 0, reconnectCountdown = 0,
-                connectionLabel = "未连接", dialog = null,
+                connectionLabel = "Disconnected", dialog = null,
+                queueSteering = emptyList(), queueFollowUp = emptyList(),
             )
         }
     }
 
-    /** 用户在重连横幅上点"取消":等同于手动断开,不再重试。*/
+    /** User taps Cancel on the reconnect banner: same as a manual disconnect; stop retrying. */
     fun cancelReconnect() = disconnect()
 
     /**
-     * 意外断开后的自动重连循环:指数退避 2s → 4s → 8s … 30s 封顶,无限重试直到
-     * 成功、用户手动断开/取消,或 ViewModel 销毁。等待期间每秒刷新倒计时 UI。
+     * Auto-reconnect loop after an unexpected drop: exponential backoff 2s → 4s → 8s … capped at 30s,
+     * retry forever until success, manual disconnect/cancel, or ViewModel destruction. Refresh the countdown UI every second while waiting.
      */
     private fun scheduleReconnect(reason: String?, immediate: Boolean = false) {
         reconnectJob?.cancel()
@@ -324,21 +331,21 @@ class PiViewModel(app: Application) : AndroidViewModel(app) {
             var attempt = 0
             while (isActive && epoch == connectEpoch && !userDisconnect) {
                 attempt++
-                // 倒计时(可被取消打断)
+                // Countdown (can be cancelled)
                 for (left in delaySecs downTo 1) {
                     if (!isActive || epoch != connectEpoch || userDisconnect) return@launch
                     _ui.value = _ui.value.copy(
                         connected = false, connecting = false,
                         reconnecting = true, reconnectAttempt = attempt, reconnectCountdown = left,
-                        connectionLabel = "连接断开${reason?.let { ": $it" } ?: ""} · ${left}s 后重连(第 $attempt 次)",
-                        // 重连期间保留聊天:banner 叠在列表上,不要把用户踢回空连接页
+                        connectionLabel = "Disconnected${reason?.let { ": $it" } ?: ""} · reconnecting in ${left}s (attempt $attempt)",
+                        // Keep the chat during reconnect: banner overlays the list; do not kick the user back to the empty connect page
                     )
                     delay(1000)
                 }
                 if (!isActive || epoch != connectEpoch || userDisconnect) return@launch
                 _ui.value = _ui.value.copy(
                     reconnecting = true, reconnectAttempt = attempt, reconnectCountdown = 0,
-                    connectionLabel = "正在重连(第 $attempt 次)…",
+                    connectionLabel = "Reconnecting (attempt $attempt)…",
                 )
                 closeResources()
                 if (attemptConnect(epoch, resetItems = false)) return@launch
@@ -371,14 +378,14 @@ class PiViewModel(app: Application) : AndroidViewModel(app) {
             rpc.connection.collect { st ->
                 when (st) {
                     is PiRpcClient.ConnectionState.Closed -> {
-                        // 手动断开 / 本地拆除 / 过期代次都不重连
+                        // Manual disconnect / local teardown / stale generation do not reconnect
                         if (userDisconnect || epoch != connectEpoch || st.reason == "closed locally") {
                             AppLog.i(TAG, "Closed ignored (userDisconnect=$userDisconnect epoch=$epoch/$connectEpoch): ${st.reason}")
                             return@collect
                         }
                         AppLog.i(TAG, "connection Closed -> reconnect path: ${st.reason}")
                         val reason = st.reason
-                        val fastFatal = reason?.startsWith("远程命令退出") == true &&
+                        val fastFatal = reason?.startsWith("Remote command exited") == true &&
                             System.currentTimeMillis() - connectedAtMs < 10_000
                         viewModelScope.launch {
                             closeResources()
@@ -389,7 +396,7 @@ class PiViewModel(app: Application) : AndroidViewModel(app) {
                                 _ui.value = _ui.value.copy(
                                     connected = false, connecting = false,
                                     reconnecting = false, reconnectAttempt = 0, reconnectCountdown = 0,
-                                    connectionLabel = "未连接", error = reason,
+                                    connectionLabel = "Disconnected", error = reason,
                                 )
                             } else {
                                 scheduleReconnect(reason)
@@ -453,7 +460,7 @@ class PiViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    /** 合并策略:live 条目替换,tool 卡片按 toolCallId 原地更新,其余追加。*/
+    /** Merge strategy: replace live items, update tool cards in place by toolCallId, append the rest. */
     private fun mergeItems(old: List<ChatItem>, fresh: List<ChatItem>): List<ChatItem> {
         val out = old.toMutableList()
         for (item in fresh) {
@@ -466,7 +473,7 @@ class PiViewModel(app: Application) : AndroidViewModel(app) {
                     val idx = out.indexOfLast { it is ChatItem.ToolCard && it.toolCallId == item.toolCallId }
                     if (idx >= 0) {
                         val prev = out[idx] as ChatItem.ToolCard
-                        // 输出取最新;args 保留首发值(update 事件不带 args)
+                        // Take the latest output; keep the first args (update events omit args)
                         out[idx] = item.copy(argsSummary = item.argsSummary ?: prev.argsSummary)
                     } else {
                         out.add(item)
@@ -485,38 +492,127 @@ class PiViewModel(app: Application) : AndroidViewModel(app) {
         return out
     }
 
-    // ---------- 用户动作 ----------
+    // ---------- User actions ----------
 
     fun sendPrompt(text: String, images: List<Pair<String, String>> = emptyList()) {
+        enqueueUserMessage(text, images, whileStreaming = StreamingSend.FollowUp)
+    }
+
+    /** Steer while streaming: delivered after current tools finish, before the next LLM call. Falls back to a normal prompt when idle. */
+    fun sendSteer(text: String, images: List<Pair<String, String>> = emptyList()) {
+        enqueueUserMessage(text, images, whileStreaming = StreamingSend.Steer)
+    }
+
+    /** Queue a follow-up while streaming: processed after the agent fully settles. Falls back to a normal prompt when idle. */
+    fun sendFollowUp(text: String, images: List<Pair<String, String>> = emptyList()) {
+        enqueueUserMessage(text, images, whileStreaming = StreamingSend.FollowUp)
+    }
+
+    private enum class StreamingSend { Steer, FollowUp }
+
+    private fun enqueueUserMessage(
+        text: String,
+        images: List<Pair<String, String>>,
+        whileStreaming: StreamingSend,
+    ) {
         val msg = text.trim()
         if ((msg.isEmpty() && images.isEmpty()) || client == null) return
-        val isStreaming = locallyStreaming || _ui.value.state?.isStreaming == true
-        val line = if (isStreaming) {
-            // 正在流式:默认用 followUp 排队,避免 steering 打断工具执行
-            PiCommands.prompt(msg, streamingBehavior = "followUp", images = images)
-        } else {
-            PiCommands.prompt(msg, images = images)
+        val streaming = locallyStreaming || _ui.value.state?.isStreaming == true
+        val id = PiCommands.nextId()
+        val line = when {
+            !streaming -> PiCommands.prompt(msg, images = images, id = id)
+            whileStreaming == StreamingSend.Steer -> PiCommands.steer(msg, images = images, id = id)
+            else -> PiCommands.followUp(msg, images = images, id = id)
+        }
+        val rejected = when {
+            !streaming -> "prompt rejected"
+            whileStreaming == StreamingSend.Steer -> "steer rejected"
+            else -> "follow-up rejected"
         }
         viewModelScope.launch {
-            val resp = client?.request(line, extractId(line) ?: return@launch)
+            val resp = client?.request(line, id)
             if (resp != null && !resp.success) {
-                _ui.value = _ui.value.copy(error = "prompt 被拒绝: ${resp.error}")
+                _ui.value = _ui.value.copy(error = "$rejected: ${resp.error}")
             } else {
-                val label = if (msg.isNotEmpty()) msg else "（已发送 ${images.size} 张图片）"
-                _ui.value = _ui.value.copy(items = _ui.value.items + ChatItem.UserText(label, key = "user-${System.nanoTime()}", imageCount = images.size))
+                val label = if (msg.isNotEmpty()) msg else "(sent ${images.size} image(s))"
+                _ui.value = _ui.value.copy(
+                    items = _ui.value.items + ChatItem.UserText(
+                        label,
+                        key = "user-${System.nanoTime()}",
+                        imageCount = images.size,
+                    ),
+                )
             }
         }
     }
 
-    fun steer(text: String) {
-        if (text.isBlank()) return
+    /**
+     * TUI Esc: clear_queue first to recover unsent text, then abort.
+     * abort alone does not clear the queue; if items remain they still run after the abort.
+     */
+    fun abort() {
         viewModelScope.launch {
-            client?.sendLine(PiCommands.named("steer", mapOf("message" to JsonPrimitive(text))))
+            val rpc = client ?: return@launch
+            val draft = clearQueueDraft(rpc)
+            if (!draft.isNullOrBlank()) {
+                _ui.value = _ui.value.copy(restoreDraft = mergeRestoreDraft(_ui.value.restoreDraft, draft))
+            }
+            val abortId = PiCommands.nextId()
+            val resp = rpc.request(PiCommands.named("abort", id = abortId), abortId)
+            if (resp != null && !resp.success) {
+                _ui.value = _ui.value.copy(error = "Abort failed: ${resp.error}")
+            }
         }
     }
 
-    fun abort() {
-        viewModelScope.launch { client?.sendLine(PiCommands.named("abort")) }
+    /** Clear the queue only (no abort) and restore the text into the composer. */
+    fun clearQueueToEditor() {
+        viewModelScope.launch {
+            val rpc = client ?: return@launch
+            val draft = clearQueueDraft(rpc)
+            if (draft.isNullOrBlank()) {
+                _ui.value = _ui.value.copy(error = "Queue is empty")
+            } else {
+                _ui.value = _ui.value.copy(restoreDraft = mergeRestoreDraft(_ui.value.restoreDraft, draft))
+            }
+        }
+    }
+
+    fun consumeRestoreDraft() {
+        if (_ui.value.restoreDraft != null) {
+            _ui.value = _ui.value.copy(restoreDraft = null)
+        }
+    }
+
+    private suspend fun clearQueueDraft(rpc: PiRpcClient): String? {
+        val id = PiCommands.nextId()
+        val resp = rpc.request(PiCommands.named("clear_queue", id = id), id)
+        if (resp == null) {
+            AppLog.w(TAG, "clear_queue TIMEOUT")
+            return null
+        }
+        if (!resp.success) {
+            AppLog.w(TAG, "clear_queue failed: ${resp.error}")
+            _ui.value = _ui.value.copy(error = "Clear queue failed: ${resp.error}")
+            return null
+        }
+        val data = resp.data
+        val steering = data?.stringList("steering").orEmpty()
+        val followUp = data?.stringList("followUp").orEmpty()
+        _ui.value = _ui.value.copy(queueSteering = emptyList(), queueFollowUp = emptyList())
+        val draft = joinQueueDraft(steering, followUp)
+        AppLog.i(TAG, "clear_queue ok steering=${steering.size} followUp=${followUp.size}")
+        return draft.ifBlank { null }
+    }
+
+    private fun mergeRestoreDraft(existing: String?, incoming: String): String {
+        val left = existing?.trim().orEmpty()
+        val right = incoming.trim()
+        return when {
+            left.isEmpty() -> right
+            right.isEmpty() -> left
+            else -> "$left\n\n$right"
+        }
     }
 
     fun newSession() {
@@ -526,16 +622,19 @@ class PiViewModel(app: Application) : AndroidViewModel(app) {
             val resp = client?.request(PiCommands.named("new_session", id = id), id)
             if (resp?.success == true) {
                 AppLog.i(TAG, "new_session ok, cancelled=${resp.data?.get("cancelled")}")
-                // 新会话后清掉恢复目标:断线重连就该是新会话,不该回到旧会话
+                // After a new session, clear the resume target: a later reconnect should stay on the new session, not jump back
                 lastSessionFile = null
                 lastEntryId = null
                 _ui.value = _ui.value.copy(
-                    items = listOf(ChatItem.SystemNote("已新建会话", key = "new-session-${System.currentTimeMillis()}")),
+                    items = listOf(ChatItem.SystemNote("New session started", key = "new-session-${System.currentTimeMillis()}")),
                     statsText = null,
+                    queueSteering = emptyList(),
+                    queueFollowUp = emptyList(),
+                    restoreDraft = null,
                 )
                 refreshAll()
             } else {
-                val msg = "新建会话失败: ${resp?.error ?: "无响应(超时或断开) id=$id"}"
+                val msg = "New session failed: ${resp?.error ?: "no response (timeout or disconnect) id=$id"}"
                 AppLog.e(TAG, "new_session FAILED: $msg")
                 _ui.value = _ui.value.copy(error = msg)
             }
@@ -550,11 +649,12 @@ class PiViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     /**
-     * 回前台 / 网络恢复时主动探活:后台冻结期间 socket 可能已死,但 readLoop 要等解冻才报 Closed。
-     * 轻量 get_state;超时且期间没有任何下行才算死,随后拆连接并进重连循环,避免 UI 一直显示"已连接"。
-     * 已在重连中则跳过。
+     * Probe when returning to foreground / network restores: the socket may have died while frozen,
+     * but readLoop only reports Closed after thaw. Lightweight get_state; only treat as dead on timeout
+     * with no inbound traffic, then tear down and reconnect so the UI does not stay on "Connected".
+     * Skip if already reconnecting.
      */
-    fun onForegroundResume() = probeAndMaybeReconnect("回前台")
+    fun onForegroundResume() = probeAndMaybeReconnect("foreground resume")
 
     private fun probeAndMaybeReconnect(reason: String) {
         val snap = _ui.value
@@ -569,13 +669,13 @@ class PiViewModel(app: Application) : AndroidViewModel(app) {
                 AppLog.i(TAG, "probe ok ($reason) success=${resp.success}")
                 return@launch
             }
-            // 等待期间可能已手动断开 / 另开连接 / 已进入重连
+            // State may have changed while waiting: manual disconnect / new connect / already reconnecting
             if (userDisconnect || client !== rpc || !_ui.value.connected) {
                 AppLog.i(TAG, "probe TIMEOUT ignored (state changed)")
                 return@launch
             }
-            // 超时期间只要有下行(响应/事件/stderr)就算活着:agent 长工具调用会把命令响应拖住,
-            // 误判重连会把正在跑的 agent 掐死
+            // Any inbound traffic during the timeout means alive: a long tool call can stall the command response,
+            // and a false reconnect would kill the running agent
             if (rpc.lastInboundAtMs > sentAt) {
                 AppLog.w(TAG, "probe TIMEOUT but inbound traffic seen ($reason); keep connection")
                 return@launch
@@ -585,7 +685,7 @@ class PiViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    /** 主动拆掉当前连接并进入重连循环(探活超时 / 网络变化用)。*/
+    /** Tear down the current connection and enter the reconnect loop (probe timeout / network change). */
     private fun forceReconnect(reason: String) {
         viewModelScope.launch {
             closeResources()
@@ -594,14 +694,14 @@ class PiViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    /** 立刻重试(不退避):网络刚恢复时用,退避只适用于"远端还没好"的场景。*/
+    /** Retry immediately (no backoff): for a just-restored network; backoff is for "remote still not ready". */
     private fun reconnectNow(reason: String) {
         if (userDisconnect) return
         AppLog.i(TAG, "reconnect now ($reason)")
         scheduleReconnect(reason, immediate = true)
     }
 
-    /** PiScreen 生命周期驱动:后台心跳加密(尽快发现 socket 被系统收走),前台放宽省电。*/
+    /** Driven by PiScreen lifecycle: tighten heartbeat in background (spot OS reclaiming the socket), relax in foreground to save power. */
     fun setBackgrounded(value: Boolean) {
         if (backgrounded == value) return
         backgrounded = value
@@ -613,9 +713,10 @@ class PiViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     /**
-     * 应用级心跳。为什么不能只靠 SSH 层心跳:传输层心跳只证明 SSH 链路能收发包,
-     * 而且 SO_TIMEOUT=0 时死 socket 会一直阻塞在 read,既不报错也不返回 —— 只有主动打探 + 看下行
-     * 才能分清"链路真死了"和"agent 正在长工具调用没空回包"。
+     * App-level heartbeat. Why SSH keepalive alone is not enough: transport keepalive only proves
+     * the SSH link can exchange packets, and with SO_TIMEOUT=0 a dead socket blocks forever on read
+     * without erroring — only an active probe plus inbound traffic can tell "link is dead" from
+     * "agent is in a long tool call and not answering".
      */
     private fun restartHeartbeat() {
         val rpc = client ?: return
@@ -625,7 +726,7 @@ class PiViewModel(app: Application) : AndroidViewModel(app) {
                 val interval = if (backgrounded) HEARTBEAT_BG_MS else HEARTBEAT_FG_MS
                 delay(interval)
                 if (client !== rpc) return@launch
-                // 最近有下行 → 链路活着,不用打探
+                // Recent inbound → link is alive, skip the probe
                 if (System.currentTimeMillis() - rpc.lastInboundAtMs < interval) continue
                 val id = PiCommands.nextId()
                 val sentAt = System.currentTimeMillis()
@@ -639,7 +740,7 @@ class PiViewModel(app: Application) : AndroidViewModel(app) {
                     continue
                 }
                 AppLog.w(TAG, "heartbeat TIMEOUT, no inbound since ${sentAt}; forcing reconnect")
-                forceReconnect("心跳超时")
+                forceReconnect("heartbeat timeout")
                 return@launch
             }
         }
@@ -653,16 +754,16 @@ class PiViewModel(app: Application) : AndroidViewModel(app) {
     private suspend fun refreshState() {
         val line = PiCommands.named("get_state")
         val resp = client?.request(line, extractId(line) ?: return)
-        // 例行刷新用 D(不落盘);TIMEOUT / success=false 才算证据
+        // Routine refresh logs at D (not to disk); TIMEOUT / success=false are evidence
         if (resp?.success == true) AppLog.d(TAG, "get_state -> success=true err=null")
         else AppLog.w(TAG, "get_state -> ${if (resp == null) "TIMEOUT" else "success=${resp.success} err=${resp.error}"}")
         if (resp?.success == true && resp.data != null) {
             val state = PiState.from(JsonObject(mapOf("data" to resp.data!!)))
-            // 记住当前会话文件,断线重连时用 --session 恢复
+            // Remember the current session file so a reconnect can resume with --session
             state.sessionFile?.takeIf { it.isNotBlank() }?.let { lastSessionFile = it }
             locallyStreaming = state.isStreaming
             _ui.value = _ui.value.copy(state = state)
-            // 顺带刷新思考级别
+            // Also refresh thinking levels
             val tlId = PiCommands.nextId()
             client?.request(PiCommands.named("get_available_thinking_levels", id = tlId), tlId)?.let { r ->
                 val levels = (r.data?.get("levels") as? JsonArray)?.mapNotNull { (it as? JsonPrimitive)?.contentOrNull }
@@ -715,7 +816,7 @@ class PiViewModel(app: Application) : AndroidViewModel(app) {
             append("tokens: ")
             append((tokens?.get("total") as? JsonPrimitive)?.contentOrNull ?: "?")
             if (ctx != null) {
-                append(" · 上下文 ")
+                append(" · context ")
                 append(formatPercent((ctx["percent"] as? JsonPrimitive)?.contentOrNull))
                 append("%")
             }
@@ -723,7 +824,7 @@ class PiViewModel(app: Application) : AndroidViewModel(app) {
         _ui.value = _ui.value.copy(statsText = text)
     }
 
-    /** 上下文百分比最多保留两位小数;整数不带尾零(30 / 12.5 / 12.34)。*/
+    /** Context percent keeps at most two decimals; integers drop trailing zeros (30 / 12.5 / 12.34). */
     private fun formatPercent(raw: String?): String {
         if (raw.isNullOrBlank()) return "?"
         val n = raw.toDoubleOrNull() ?: return raw
@@ -735,8 +836,8 @@ class PiViewModel(app: Application) : AndroidViewModel(app) {
         var since = lastEntryId
         val id = PiCommands.nextId()
         var resp = client?.request(PiCommands.getEntries(since, id), id)
-        // 服务端找不到游标时,退回全量同步并重置本地历史;since 必须一并置空,
-        // 否则全量快照会 merge 到整个旧列表上,整段对话显示两遍
+        // If the server cannot find the cursor, fall back to a full sync and reset local history; since must be cleared too,
+        // otherwise the full snapshot merges onto the old list and the whole conversation appears twice
         if (resp?.success != true && since != null) {
             AppLog.w(TAG, "get_entries since=$since failed; retrying full")
             lastEntryId = null
@@ -759,7 +860,7 @@ class PiViewModel(app: Application) : AndroidViewModel(app) {
                     val text = msg.blocks.firstNotNullOfOrNull { b -> b.text }.orEmpty()
                     val imageCount = msg.blocks.count { it.type == "image" }
                     if (text.isNotBlank() || imageCount > 0) {
-                        items.add(ChatItem.UserText(text.ifBlank { "（${imageCount} 张图片）" }, key = "hist-u-${entry.str("id") ?: items.size}", timeMs = msg.timestamp ?: 0, imageCount = imageCount))
+                        items.add(ChatItem.UserText(text.ifBlank { "(${imageCount} image(s))" }, key = "hist-u-${entry.str("id") ?: items.size}", timeMs = msg.timestamp ?: 0, imageCount = imageCount))
                     }
                 }
                 "assistant" -> {
@@ -813,15 +914,15 @@ class PiViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch {
             _ui.value = _ui.value.copy(sessionsLoading = true)
             try {
-                // 当前激活会话所在目录:兜底覆盖 --session-dir 等自定义目录场景
+                // Directory of the active session: covers custom --session-dir cases as a fallback
                 val fallbackDir = _ui.value.state?.sessionFile
                     ?.takeIf { it.isNotBlank() }
                     ?.substringBeforeLast('/', "")
                     ?.takeIf { it.isNotBlank() }
-                // 可移植列会话:不用 GNU find -printf(远端可能是 BusyBox/BSD find),
-                // 目录取 PI_CODING_AGENT_DIR/PI_CODING_AGENT_SESSION_DIR(与上游 getAgentDir/getSessionsDir 一致),
-                // mtime 用 stat 双写法(GNU -c %Y / BSD -f %m)兼容,排序后取最近 30 个;
-                // 每个文件抓最后一条 session_info 的 name 作为显示名(pi TUI 的命名就存在文件里)
+                // Portable session listing: do not use GNU find -printf (remote may be BusyBox/BSD find);
+                // dirs from PI_CODING_AGENT_DIR/PI_CODING_AGENT_SESSION_DIR (same as upstream getAgentDir/getSessionsDir);
+                // mtime via dual stat forms (GNU -c %Y / BSD -f %m), sort and take the latest 30;
+                // display name is the last session_info name in each file (same naming the pi TUI stores)
                 val listFn =
                     "lsSessions() { d=\"\$1\"; [ -d \"\$d\" ] || return 0; " +
                         "find \"\$d\" -type f -name '*.jsonl' 2>/dev/null | " +
@@ -856,7 +957,7 @@ class PiViewModel(app: Application) : AndroidViewModel(app) {
                 _ui.value = _ui.value.copy(sessions = entries, sessionsDir = sessDir)
             } catch (e: Exception) {
                 AppLog.e(TAG, "listSessions FAILED: ${e.message}")
-                _ui.value = _ui.value.copy(error = "列会话失败: ${e.message}")
+                _ui.value = _ui.value.copy(error = "List sessions failed: ${e.message}")
             } finally {
                 _ui.value = _ui.value.copy(sessionsLoading = false)
             }
@@ -879,15 +980,15 @@ class PiViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     /**
-     * 删除会话文件。RPC 无 delete 命令,与 pi TUI 的 deleteSessionFile 一致走文件级删除;
-     * 当前激活的会话拒绝删除(与 TUI 行为相同)。用单引号包路径防止 shell 元字符注入。
+     * Delete a session file. RPC has no delete command; same as pi TUI deleteSessionFile, delete at the file level.
+     * Refuse to delete the active session (same as TUI). Quote the path with single quotes to avoid shell metachar injection.
      */
     fun deleteSession(path: String) {
         viewModelScope.launch {
             val s = activeSettings.value
             val active = _ui.value.state?.sessionFile
             if (active != null && pathsEqual(active, path)) {
-                _ui.value = _ui.value.copy(error = "不能删除当前会话,请先切换到其他会话")
+                _ui.value = _ui.value.copy(error = "Cannot delete the active session; switch first")
                 return@launch
             }
             try {
@@ -901,18 +1002,18 @@ class PiViewModel(app: Application) : AndroidViewModel(app) {
                     _ui.value = _ui.value.copy(sessions = _ui.value.sessions.filter { it.path != path })
                 } else {
                     AppLog.e(TAG, "deleteSession FAILED: $path, out=$out")
-                    _ui.value = _ui.value.copy(error = "删除失败: $out")
+                    _ui.value = _ui.value.copy(error = "Delete failed: $out")
                 }
             } catch (e: Exception) {
                 AppLog.e(TAG, "deleteSession ERROR: ${e.message}")
-                _ui.value = _ui.value.copy(error = "删除失败: ${e.message}")
+                _ui.value = _ui.value.copy(error = "Delete failed: ${e.message}")
             }
         }
     }
 
     private fun pathsEqual(a: String, b: String): Boolean {
         if (a == b) return true
-        // 容忍尾部差异:sessionFile 可能带或不带扩展名/相对前缀,比对规范化后的绝对路径
+        // Tolerate trailing differences: sessionFile may or may not include extension/relative prefix; compare normalized absolute paths
         val norm = { p: String -> p.removePrefix("~/").removePrefix("/root/").trimEnd('/') }
         return norm(a) == norm(b)
     }
@@ -920,12 +1021,12 @@ class PiViewModel(app: Application) : AndroidViewModel(app) {
     fun setSessionName(name: String) {
         viewModelScope.launch {
             val id = PiCommands.nextId()
-            // 必须把同一个 id 写进请求体;否则 waiter 等 A、服务端回 B → UNMATCHED + 假 TIMEOUT
+            // The same id must go in the request body; otherwise the waiter waits on A while the server replies B → UNMATCHED + false TIMEOUT
             val resp = client?.request(PiCommands.setSessionNameReq(name, id = id), id)
             if (resp?.success == true) {
                 _ui.value = _ui.value.copy(state = _ui.value.state?.copy(sessionName = name.ifBlank { null }))
             } else {
-                _ui.value = _ui.value.copy(error = "重命名失败: ${resp?.error ?: "无响应"}")
+                _ui.value = _ui.value.copy(error = "Rename failed: ${resp?.error ?: "no response"}")
             }
         }
     }
@@ -951,7 +1052,7 @@ class PiViewModel(app: Application) : AndroidViewModel(app) {
         _ui.value = _ui.value.copy(error = null)
     }
 
-    /** 取日志全文(分享用);调用后 logSeq 递增,触发日志弹窗刷新。*/
+    /** Full log dump (for sharing); increments logSeq afterward so the log dialog refreshes. */
     fun getLogText(): String = AppLog.dump()
 
     fun refreshLogView() {
@@ -970,8 +1071,8 @@ class PiViewModel(app: Application) : AndroidViewModel(app) {
         stopHeartbeat()
         stopObserving()
         runCatching { connectivity?.unregisterNetworkCallback(networkCallback) }
-        // Activity 真正销毁时关掉套接字,避免 SSH/RPC 泄漏到进程退出。
-        // 关闭会阻塞到 socket 收尾,放独立 IO 作用域异步做,不在主线程 runBlocking(有 ANR 面)
+        // Close sockets when the Activity is truly destroyed so SSH/RPC do not leak until process exit.
+        // Close blocks until the socket finishes; do it async on a dedicated IO scope, never runBlocking on the main thread (ANR risk)
         val closingClient = client
         val closingSsh = ssh
         client = null
@@ -982,8 +1083,8 @@ class PiViewModel(app: Application) : AndroidViewModel(app) {
                 runCatching { closingSsh?.close() }
             }
         }
-        // 连接已随 ViewModel 关闭,保活服务失去意义:立刻停掉,
-        // 否则 FGS 会持 Wakelock/WifiLock 空转到 10 分钟窗口结束(stopWithTask=false 时还会活过划掉 App)
+        // Connection closed with the ViewModel, so keep-alive is pointless: stop immediately,
+        // otherwise the FGS holds WakeLock/WifiLock idle until the 10-minute window ends (and with stopWithTask=false it can outlive swiping away the app)
         runCatching { ConnectionKeepAliveService.stop(getApplication()) }
         super.onCleared()
     }
@@ -998,11 +1099,11 @@ sealed interface DialogAnswer {
 private const val RECONNECT_BASE_SECS = 2
 private const val RECONNECT_MAX_SECS = 30
 
-/** 后台心跳间隔:切后台后加密,尽快发现"系统把 socket 收走了"。*/
+/** Background heartbeat interval: tighten after backgrounding to spot the OS reclaiming the socket. */
 private const val HEARTBEAT_BG_MS = 20_000L
-/** 前台心跳间隔:链路有 RPC 流量时本来就会续命,这里只做兜底,省电优先。*/
+/** Foreground heartbeat interval: RPC traffic already keeps the link alive; this is a fallback, prefer saving power. */
 private const val HEARTBEAT_FG_MS = 60_000L
-/** 心跳/探活的 get_state 超时;超时后还要看期间有没有任何下行才算死。*/
+/** get_state timeout for heartbeat/probe; after timeout, only treat as dead if there was no inbound traffic. */
 private const val HEARTBEAT_TIMEOUT_MS = 10_000L
 private const val RESUME_PROBE_TIMEOUT_MS = 8_000L
 
@@ -1016,7 +1117,7 @@ private fun ConnectionSettings.toSshConfig(): SshConfig = SshConfig(
 
 private fun shellQuote(s: String): String = "'" + s.replace("'", "'\\''") + "'"
 
-/** 从序列化命令 JSON 里拿回 id,避免 PiCommands 暴露内部状态。*/
+/** Pull id back out of a serialized command JSON so PiCommands does not expose internal state. */
 private fun extractId(line: String): String? = try {
     (piJson.parseToJsonElement(line).jsonObject["id"] as? JsonPrimitive)?.contentOrNull
 } catch (_: Exception) {

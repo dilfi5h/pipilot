@@ -10,8 +10,8 @@ import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 
 /**
- * pi RPC 模式的数据模型(packages/coding-agent/docs/rpc.md)。
- * 字段尽量保持宽松:未知字段忽略,可缺省字段给默认值,协议演进时不至于崩。
+ * Data models for pi RPC mode (packages/coding-agent/docs/rpc.md).
+ * Fields stay loose: unknown keys are ignored, optional fields get defaults, so protocol evolution does not crash the client.
  */
 
 val piJson = kotlinx.serialization.json.Json {
@@ -20,9 +20,9 @@ val piJson = kotlinx.serialization.json.Json {
     encodeDefaults = false
 }
 
-// ---------- 顶层行 ----------
+// ---------- Top-level line ----------
 
-/** 从 stdout 读到的一行 JSON。*/
+/** One JSON line read from stdout. */
 sealed interface PiLine {
     data class Response(val value: JsonObject) : PiLine
     data class Event(val value: JsonObject) : PiLine
@@ -35,12 +35,12 @@ fun parseLine(line: String): PiLine {
     return when (obj["type"]?.jsonPrimitive?.contentOrNull) {
         "response" -> PiLine.Response(obj)
         "extension_ui_request" -> PiLine.ExtensionUiRequest(obj)
-        // 其余全部按事件处理,包括未知类型,便于调试展示
+        // Everything else is an event, including unknown types, so debug UI can still show them
         else -> PiLine.Event(obj)
     }
 }
 
-// ---------- 响应 ----------
+// ---------- Response ----------
 
 data class PiResponse(
     val id: String?,
@@ -78,6 +78,13 @@ fun JsonObject.boolOrNull(key: String): Boolean? = when (val e = this[key]) {
     }
     else -> null
 }
+
+fun JsonObject.stringList(key: String): List<String> =
+    (this[key] as? JsonArray)?.mapNotNull { (it as? JsonPrimitive)?.contentOrNull } ?: emptyList()
+
+/** Join clear_queue / local queues back into the composer: steering first, follow-up after, blank line between. */
+fun joinQueueDraft(steering: List<String>, followUp: List<String>): String =
+    (steering + followUp).map { it.trim() }.filter { it.isNotEmpty() }.joinToString("\n\n")
 
 // ---------- get_state ----------
 
@@ -124,7 +131,7 @@ data class PiState(
     }
 }
 
-// ---------- 事件 ----------
+// ---------- Events ----------
 
 data class DeltaEvent(
     val type: String,
@@ -132,7 +139,7 @@ data class DeltaEvent(
     val delta: String?,
     val toolName: String?,
     val toolCallId: String?,
-    val content: String?, // text_end 带全文
+    val content: String?, // text_end carries the full text
 )
 
 data class PiEvent(
@@ -156,7 +163,7 @@ data class PiEvent(
     val toolCallId: String? get() = raw.str("toolCallId")
     val toolName: String? get() = raw.str("toolName")
 
-    /** tool_execution_update 的 partialResult.content[].text 拼接(累计输出,直接替换显示)。*/
+    /** Concatenate tool_execution_update partialResult.content[].text (cumulative output; replace the display). */
     val partialToolText: String?
         get() = (raw["partialResult"] as? JsonObject)
             ?.let { it["content"] as? JsonArray }
@@ -165,7 +172,7 @@ data class PiEvent(
             }
             ?.takeIf { it.isNotEmpty() }
 
-    /** tool_execution_end 的 result.content[].text 拼接。*/
+    /** Concatenate tool_execution_end result.content[].text. */
     val resultToolText: String?
         get() = (raw["result"] as? JsonObject)
             ?.let { it["content"] as? JsonArray }
@@ -176,19 +183,19 @@ data class PiEvent(
 
     val isError: Boolean get() = raw.boolOrNull("isError") ?: false
 
-    /** message_start / message_end 里的完整消息。*/
+    /** Full message on message_start / message_end. */
     val message: JsonObject? get() = raw["message"] as? JsonObject
 
-    /** agent_end 里的 willRetry。*/
+    /** willRetry on agent_end. */
     val willRetry: Boolean get() = raw.boolOrNull("willRetry") ?: false
 
-    /** queue_update 里的队列。*/
+    /** Queues on queue_update. */
     val steeringQueue: List<String>
         get() = (raw["steering"] as? JsonArray)?.mapNotNull { (it as? JsonPrimitive)?.contentOrNull } ?: emptyList()
     val followUpQueue: List<String>
         get() = (raw["followUp"] as? JsonArray)?.mapNotNull { (it as? JsonPrimitive)?.contentOrNull } ?: emptyList()
 
-    /** extension_ui_request 字段 */
+    /** extension_ui_request fields */
     val uiMethod: String? get() = raw.str("method")
     val uiTitle: String? get() = raw.str("title")
     val uiMessage: String? get() = raw.str("message")
@@ -198,7 +205,7 @@ data class PiEvent(
     val uiPrefill: String? get() = raw.str("prefill")
 }
 
-// ---------- 消息(get_messages / message_end) ----------
+// ---------- Messages (get_messages / message_end) ----------
 
 data class ContentBlock(
     val type: String, // text / thinking / toolCall / image
@@ -239,7 +246,7 @@ data class ChatMessage(
                 }
                 else -> emptyList()
             }
-            // bashExecution 消息不是标准 content 结构
+            // bashExecution messages are not the standard content structure
             if (role == "bashExecution") {
                 return ChatMessage(
                     role = role,
@@ -279,7 +286,7 @@ data class PiEntry(
     }
 }
 
-// ---------- 命令构造 ----------
+// ---------- Command builders ----------
 
 object PiCommands {
     private val counter = java.util.concurrent.atomic.AtomicInteger(0)
@@ -289,27 +296,56 @@ object PiCommands {
         message: String,
         streamingBehavior: String? = null,
         images: List<Pair<String, String>> = emptyList(),
+        id: String = nextId(),
     ): String {
         val obj = buildMap {
-            put("id", JsonPrimitive(nextId()))
+            put("id", JsonPrimitive(id))
             put("type", JsonPrimitive("prompt"))
             put("message", JsonPrimitive(message))
             if (streamingBehavior != null) put("streamingBehavior", JsonPrimitive(streamingBehavior))
             if (images.isNotEmpty()) {
-                put(
-                    "images",
-                    JsonArray(images.map { (base64, mimeType) ->
-                        JsonObject(mapOf(
-                            "type" to JsonPrimitive("image"),
-                            "data" to JsonPrimitive(base64),
-                            "mimeType" to JsonPrimitive(mimeType),
-                        ))
-                    }),
-                )
+                put("images", imageArray(images))
             }
         }
         return JsonObject(obj).toString()
     }
+
+    fun steer(
+        message: String,
+        images: List<Pair<String, String>> = emptyList(),
+        id: String = nextId(),
+    ): String {
+        val obj = buildMap {
+            put("id", JsonPrimitive(id))
+            put("type", JsonPrimitive("steer"))
+            put("message", JsonPrimitive(message))
+            if (images.isNotEmpty()) put("images", imageArray(images))
+        }
+        return JsonObject(obj).toString()
+    }
+
+    fun followUp(
+        message: String,
+        images: List<Pair<String, String>> = emptyList(),
+        id: String = nextId(),
+    ): String {
+        val obj = buildMap {
+            put("id", JsonPrimitive(id))
+            put("type", JsonPrimitive("follow_up"))
+            put("message", JsonPrimitive(message))
+            if (images.isNotEmpty()) put("images", imageArray(images))
+        }
+        return JsonObject(obj).toString()
+    }
+
+    private fun imageArray(images: List<Pair<String, String>>): JsonArray =
+        JsonArray(images.map { (base64, mimeType) ->
+            JsonObject(mapOf(
+                "type" to JsonPrimitive("image"),
+                "data" to JsonPrimitive(base64),
+                "mimeType" to JsonPrimitive(mimeType),
+            ))
+        })
 
     fun named(type: String, extra: Map<String, JsonElement> = emptyMap(), id: String = nextId()): String {
         val obj = buildMap {

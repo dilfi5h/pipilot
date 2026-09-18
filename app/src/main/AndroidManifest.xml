@@ -36,7 +36,7 @@
                 android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
                 android:value="Briefly keep the SSH/RPC coding-agent session alive while PiPilot is in the background" />
         </service>
-        <!-- 日志文件分享:只暴露私有 filesDir 供用户把 pipilot.log 整文件发出 -->
+        <!-- Log sharing: expose private filesDir so the user can send pipilot.log as a whole file -->
         <provider
             android:name="androidx.core.content.FileProvider"
             android:authorities="${applicationId}.fileprovider"

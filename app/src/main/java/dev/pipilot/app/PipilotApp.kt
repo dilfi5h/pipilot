@@ -5,16 +5,18 @@ import dev.pipilot.app.log.AppLog
 import java.io.File
 
 /**
- * 崩溃证据落盘:任何未捕获异常在进程退出前,把堆栈+近期 AppLog 写到
- * files/crash-last.txt;下次启动 MainActivity 读出并入 AppLog(设置→查看日志可见)。
- * 没有连接 adb 的真机也能拿到闪退堆栈,不再靠猜修 bug。
+ * Persist crash evidence: on any uncaught exception, write the stack plus recent
+ * AppLog lines to files/crash-last.txt before the process dies. Next launch,
+ * MainActivity reads it into AppLog (visible under Settings → View logs).
+ * Physical devices without adb can still recover the crash stack.
  */
 class PipilotApp : Application() {
 
     override fun onCreate() {
         super.onCreate()
-        // 日志落盘:后台被系统冻结/杀掉后,内存环形日志会一起消失(切后台断链一直抓不到瞬间
-        // 就是因为这个),所以生命周期级日志必须写到 filesDir
+        // Persist logs to filesDir: after the OS freezes/kills the process in the
+        // background, the in-memory ring buffer is gone (that is why background
+        // disconnects never captured the moment they happened).
         AppLog.init(filesDir)
         val defaultHandler = Thread.getDefaultUncaughtExceptionHandler()
         Thread.setDefaultUncaughtExceptionHandler { thread, e ->
@@ -35,19 +37,19 @@ class PipilotApp : Application() {
     companion object {
         private const val BATTERY_PROMPT_MARK = "battery-opt-prompted"
 
-        /** 启动时读取上次崩溃并入 AppLog,读完即删。返回 true 表示有崩溃记录。 */
+        /** Read the last crash into AppLog on startup, then delete it. Returns true if a crash was found. */
         fun consumeLastCrash(filesDir: File): Boolean {
             val f = File(filesDir, "crash-last.txt")
             if (!f.exists()) return false
             val text = runCatching { f.readText() }.getOrNull()
             f.delete()
             if (text.isNullOrBlank()) return false
-            AppLog.e("Crash", "上次闪退堆栈 ↓")
+            AppLog.e("Crash", "last crash stack ↓")
             text.lineSequence().take(60).forEach { AppLog.e("Crash", it) }
             return true
         }
 
-        /** 后台保活引导是否已提示过:只引导一次,避免每次连上都弹系统页。*/
+        /** Whether the battery-optimization prompt has already been shown (once only, so connect does not keep opening the system page). */
         fun batteryPromptShown(filesDir: File): Boolean = File(filesDir, BATTERY_PROMPT_MARK).exists()
 
         fun markBatteryPromptShown(filesDir: File) {

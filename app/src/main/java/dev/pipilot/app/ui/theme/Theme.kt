@@ -7,7 +7,7 @@ import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.graphics.Color
 
-// 品牌青,与 launcher 图标一致
+// Brand cyan, matching the launcher icon
 val PiCyan = Color(0xFF22D3EE)
 private val PiCyanDim = Color(0xFF0E7490)
 

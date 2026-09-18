@@ -6,18 +6,18 @@ import java.util.Date
 import java.util.Locale
 import java.util.TimeZone
 
-/** 东八区时间戳格式(HH:mm:ss),每条对话气泡下显示。*/
+/** Timestamp under each chat bubble, formatted as HH:mm:ss in Asia/Shanghai. */
 fun formatShanghai(millis: Long): String {
     val f = SimpleDateFormat("HH:mm:ss", Locale.getDefault())
     f.timeZone = TimeZone.getTimeZone("Asia/Shanghai")
     return f.format(Date(millis))
 }
 
-/** 聊天列表里的一行。把消息和工具执行统一成可渲染的条目。*/
+/** One row in the chat list. Messages and tool runs are unified into renderable items. */
 @Immutable
 sealed interface ChatItem {
     val key: String
-    /** 东八区显示时间(毫秒);0 表示不显示。*/
+    /** Display time in Asia/Shanghai (ms); 0 means hidden. */
     val timeMs: Long get() = 0
 
     @Immutable

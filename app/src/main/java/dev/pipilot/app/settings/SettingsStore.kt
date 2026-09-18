@@ -39,8 +39,8 @@ class SettingsStore(private val context: Context) {
     private val WORK_DIR = stringPreferencesKey("work_dir")
 
     val settings: Flow<ConnectionSettings> = context.dataStore.data
-        // DataStore 文件损坏(进程写中途被杀等)会让所有收集方直接抛异常→启动闪退;
-        // 这里降级为空配置,app 能起来,用户重填即可
+        // A corrupt DataStore file (process killed mid-write, etc.) would crash every collector on launch;
+        // degrade to empty settings so the app still starts and the user can re-enter them.
         .catch { emit(emptyPreferences()) }
         .map { p ->
             ConnectionSettings(
@@ -70,11 +70,11 @@ class SettingsStore(private val context: Context) {
         }
     }
 
-    /** 多主机配置用的底层读写:profiles JSON + 当前选中名。 */
+    /** Low-level read/write for multi-host config: profiles JSON + currently selected name. */
     internal val profilesPreferences: Flow<Preferences> =
         context.dataStore.data.catch { emit(emptyPreferences()) }
 
-    /** 从同一份 Preferences 快照解析老版单配置(供 HostProfiles 免第二次读盘迁移)。 */
+    /** Parse the legacy single config from the same Preferences snapshot (HostProfiles migrates without a second disk read). */
     internal fun legacySettings(p: Preferences): ConnectionSettings = ConnectionSettings(
         host = p[HOST] ?: "",
         port = p[PORT] ?: "22",

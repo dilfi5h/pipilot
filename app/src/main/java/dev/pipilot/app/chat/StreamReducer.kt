@@ -5,24 +5,24 @@ import dev.pipilot.app.rpc.ContentBlock
 import dev.pipilot.app.rpc.PiEvent
 
 /**
- * 把 RPC 事件流归约成 UI 条目。
+ * Reduce the RPC event stream into UI items.
  *
- * 流式拼装规则(按 docs/rpc.md):
- * - message_update 不带快照,要用 contentIndex + delta 自行累积
- * - tool_execution_update.partialResult 是累计输出,直接替换
- * - message_end.message 是权威终态:落 final 气泡,VM 层负责删 live(见 RemoveLive 标记)
+ * Streaming assembly (see docs/rpc.md):
+ * - message_update has no snapshot; accumulate with contentIndex + delta
+ * - tool_execution_update.partialResult is cumulative output; replace in place
+ * - message_end.message is authoritative: emit the final bubble; the VM drops live (see RemoveLive)
  */
 class StreamReducer {
 
-    /** 特殊标记:VM 收到后删除 live 气泡(message_end 落 final 时用)。*/
+    /** Sentinel: VM drops the live bubble after receiving this (used when message_end commits the final). */
     data object RemoveLive : ChatItem {
         override val key: String = "live"
     }
 
-    // 正在流式生成的助手消息:key = "live"
+    // Assistant message currently streaming: key = "live"
     private var liveText = StringBuilder()
     private var liveThinking = StringBuilder()
-    // 流式中的 toolcall:name 累计参数
+    // In-flight toolcall: name plus accumulated args
     private val liveToolCalls = LinkedHashMap<String, LiveToolCall>()
     private var streaming = false
 
@@ -39,8 +39,8 @@ class StreamReducer {
                 liveText = StringBuilder()
                 liveThinking = StringBuilder()
                 liveToolCalls.clear()
-                // agent 一启动就放空气泡占位:首 token 前的服务端思考期(可达 10-40s)
-                // 也要有闪动光标,否则用户面对的是一片死寂
+                // Plant an empty bubble as soon as the agent starts: the pre-token thinking
+                // window (10–40s) still needs a blinking cursor, or the UI looks dead.
                 sink(ChatItem.AssistantText(text = "", thinking = null, streaming = true, key = "live"))
             }
 
@@ -56,7 +56,7 @@ class StreamReducer {
                         emitLive(sink)
                     }
                     "text_end" -> {
-                        // 权威全文,直接覆盖
+                        // Authoritative full text; overwrite
                         if (d.content != null) {
                             liveText = StringBuilder(d.content)
                             emitLive(sink)
@@ -85,7 +85,7 @@ class StreamReducer {
                 val id = event.toolCallId ?: return
                 val args = extractArgsText(event.raw["args"])
                 emitToolCard(sink, id, event.toolName ?: "?", args, output = null, running = true)
-                // 助手文本部分随 toolcall_start 已固化,清空 live 文本但不 emit 空气泡
+                // Assistant text was already committed on toolcall_start; clear live text but do not emit an empty bubble
                 liveText = StringBuilder()
                 liveThinking = StringBuilder()
             }
@@ -102,9 +102,10 @@ class StreamReducer {
             }
 
             "message_end" -> {
-                // 权威终态:整条消息落库,同时让 VM 删掉 live 气泡(避免一条回复显示两次)。
-                // 只对 assistant 收尾:user 消息的 message_end 回显紧跟 prompt 到达,
-                // 不能清 live 状态(会掐掉 agent_start 刚放的等待光标气泡)
+                // Authoritative final: persist the whole message and have the VM drop live
+                // (so one reply is not shown twice). Only on assistant close: a user
+                // message_end echo arrives right after prompt and must not clear live
+                // (that would kill the waiting-cursor bubble planted on agent_start).
                 val msgObj = event.message ?: return
                 val msg = ChatMessage.from(msgObj)
                 if (msg.role != "assistant") return
@@ -126,33 +127,33 @@ class StreamReducer {
                 sink(ChatItem.BashOutput(command = null, output = delta, running = true, key = "bash-$id"))
             }
 
-            // 注意 key 必须唯一:LazyColumn 重复 key 会直接崩,系统类提示一律带时间戳
-            "compaction_start" -> sink(ChatItem.SystemNote("正在压缩上下文…", key = "compaction-start-${System.nanoTime()}"))
+            // Keys must be unique: LazyColumn crashes on duplicates; system notes always include a timestamp
+            "compaction_start" -> sink(ChatItem.SystemNote("Compacting context…", key = "compaction-start-${System.nanoTime()}"))
             "compaction_end" -> {
                 val ok = event.raw["result"] != null
-                sink(ChatItem.SystemNote(if (ok) "上下文压缩完成" else "上下文压缩失败", key = "compaction-end-${System.nanoTime()}"))
+                sink(ChatItem.SystemNote(if (ok) "Context compacted" else "Context compaction failed", key = "compaction-end-${System.nanoTime()}"))
             }
             "auto_retry_start" -> sink(
                 ChatItem.SystemNote(
-                    "临时错误,自动重试中(第 ${event.raw.intOrNull("attempt")} 次)…",
+                    "Transient error, retrying (attempt ${event.raw.intOrNull("attempt")})…",
                     key = "retry-${System.nanoTime()}",
                 )
             )
             "auto_retry_end" -> {
-                // 最终失败必须浮出:success=false 带 finalError,否则用户只见"卡住"不知何故
+                // Final failure must surface: success=false carries finalError, otherwise the user only sees a hang
                 if (event.raw.boolOrNull("success") == false) {
-                    val err = event.raw.str("finalError") ?: "未知错误"
-                    sink(ChatItem.SystemNote("请求失败(已重试 ${event.raw.intOrNull("attempt") ?: "?"} 次): ${err.take(300)}", key = "retry-final-${System.nanoTime()}"))
+                    val err = event.raw.str("finalError") ?: "unknown error"
+                    sink(ChatItem.SystemNote("Request failed (retried ${event.raw.intOrNull("attempt") ?: "?"} times): ${err.take(300)}", key = "retry-final-${System.nanoTime()}"))
                 }
             }
             "extension_error" -> sink(
-                ChatItem.SystemNote("扩展错误: ${event.raw.str("error")}", key = "ext-err-${System.nanoTime()}")
+                ChatItem.SystemNote("Extension error: ${event.raw.str("error")}", key = "ext-err-${System.nanoTime()}")
             )
         }
     }
 
     private fun emitLive(sink: (ChatItem) -> Unit) {
-        // 空文本不 emit:避免流式间隙出现空白气泡
+        // Do not emit empty text: avoids blank bubbles in streaming gaps
         if (liveText.isEmpty() && liveThinking.isEmpty()) return
         val text = liveText.toString()
         val thinking = liveThinking.toString().ifEmpty { null }
@@ -180,7 +181,7 @@ class StreamReducer {
                 "thinking" -> thinking.append(b.text ?: "")
             }
         }
-        // 正文思考都空就不落气泡(纯工具调用由 ToolCard 展示,避免空白条目)
+        // Skip a bubble if both body and thinking are empty (tool-only turns use ToolCard)
         if (text.isEmpty() && thinking.isEmpty()) return
         sink(
             ChatItem.AssistantText(
@@ -193,10 +194,10 @@ class StreamReducer {
         )
     }
 
-    /** 从 args JsonElement 提取人类可读摘要。*/
+    /** Human-readable summary from an args JsonElement. */
     fun extractArgsText(args: kotlinx.serialization.json.JsonElement?): String? {
         val obj = args as? kotlinx.serialization.json.JsonObject ?: return args?.toString()?.take(300)
-        // 常见工具的展示字段
+        // Common tool display fields
         obj["command"]?.let { return (it as? kotlinx.serialization.json.JsonPrimitive)?.content }
         obj["path"]?.let { return (it as? kotlinx.serialization.json.JsonPrimitive)?.content }
         obj["file_path"]?.let { return (it as? kotlinx.serialization.json.JsonPrimitive)?.content }

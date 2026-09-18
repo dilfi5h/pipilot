@@ -32,12 +32,14 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 
 /**
- * 轻量 Markdown 渲染:pi 的回复以 markdown 为主,纯 Text 显示会糊成一片。
- * 支持:标题/无序有序列表/引用/分隔线/围栏代码块(带简易语法着色)/行内 code、粗体、斜体、删除线、链接。
- * 有意不引第三方库(依赖下载要走代理,聊天场景这套子集够用);解析不出结构的文本原样显示。
+ * Lightweight Markdown rendering: pi replies are mostly markdown, and plain Text turns them into a blob.
+ * Supports headings, unordered/ordered lists, quotes, rules, fenced code (simple highlighting),
+ * inline code, bold, italic, strikethrough, and links.
+ * No third-party library on purpose (deps would need a proxy; this subset is enough for chat);
+ * text that does not parse as structure is shown as-is.
  */
 
-// ---------- 块级解析 ----------
+// ---------- Block parse ----------
 
 private sealed interface MdBlock {
     data class Para(val text: String) : MdBlock
@@ -82,7 +84,7 @@ private fun parseBlocks(src: String): List<MdBlock> {
                     code.appendLine(lines[i])
                     i++
                 }
-                i++ // 跳过收尾 ```(或 EOF)
+                i++ // skip closing ``` (or EOF)
                 blocks.add(MdBlock.Code(lang, code.toString().trimEnd('\n', '\r')))
             }
             ruleM != null -> { flushPara(); blocks.add(MdBlock.Rule); i++ }
@@ -106,7 +108,7 @@ private fun parseBlocks(src: String): List<MdBlock> {
     return blocks
 }
 
-// ---------- 行内解析 ----------
+// ---------- Inline parse ----------
 
 private data class InlineStyle(
     val bold: Boolean = false,
@@ -116,7 +118,7 @@ private data class InlineStyle(
     val link: Boolean = false,
 )
 
-/** 切成 (文本, 样式) 序列;不认识的记号原样保留。*/
+/** Split into (text, style) runs; unknown markers are kept as-is. */
 private fun parseInline(text: String, base: InlineStyle = InlineStyle()): List<Pair<String, InlineStyle>> {
     val runs = ArrayList<Pair<String, InlineStyle>>()
     val lit = StringBuilder()
@@ -216,9 +218,9 @@ private fun inlineText(text: String): AnnotatedString {
     }
 }
 
-// ---------- 代码块简易语法着色 ----------
+// ---------- Simple code highlighting ----------
 
-// 主流语言关键字混编一套,聊天代码块够用;着色不准确也无伤大雅
+// Mixed keywords from common languages; good enough for chat code blocks; inaccurate coloring is fine
 private val CODE_KEYWORDS = setOf(
     "abstract", "and", "as", "async", "await", "break", "case", "catch", "class", "const",
     "continue", "def", "default", "do", "elif", "else", "enum", "export", "extends", "false",
@@ -258,7 +260,7 @@ private fun highlightCode(code: String, lang: String?): AnnotatedString = buildA
     while (i < n) {
         val c = code[i]
         when {
-            // 行注释
+            // line comment
             (c == '/' && i + 1 < n && code[i + 1] == '/') || (hashComment && c == '#') -> {
                 flush()
                 val end = code.indexOf('\n', i)
@@ -266,7 +268,7 @@ private fun highlightCode(code: String, lang: String?): AnnotatedString = buildA
                 styled(i, stop, CodeComment)
                 i = stop
             }
-            // 块注释
+            // block comment
             c == '/' && i + 1 < n && code[i + 1] == '*' -> {
                 flush()
                 val end = code.indexOf("*/", i + 2)
@@ -274,7 +276,7 @@ private fun highlightCode(code: String, lang: String?): AnnotatedString = buildA
                 styled(i, stop, CodeComment)
                 i = stop
             }
-            // 字符串(含转义;未闭合保守断到行尾,反引号模板串允许跨行)
+            // string (with escapes; unclosed strings stop at EOL; backtick templates may span lines)
             c == '"' || c == '\'' || c == '`' -> {
                 flush()
                 var j = i + 1
@@ -311,9 +313,9 @@ private fun highlightCode(code: String, lang: String?): AnnotatedString = buildA
     flush()
 }
 
-// ---------- 渲染 ----------
+// ---------- Render ----------
 
-/** pi 回复用的 markdown 渲染入口;空文本不渲染任何东西。*/
+/** Markdown entry point for pi replies; blank text renders nothing. */
 @Composable
 fun MarkdownText(markdown: String, modifier: Modifier = Modifier) {
     if (markdown.isBlank()) return

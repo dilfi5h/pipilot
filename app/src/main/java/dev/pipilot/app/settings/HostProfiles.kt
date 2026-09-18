@@ -11,7 +11,7 @@ import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.contentOrNull
 
-/** 命名主机配置。多主机 = 命名配置列表 + 当前选中名。 */
+/** Named host profile. Multi-host = named list + currently selected name. */
 data class HostProfile(
     val name: String,
     val settings: ConnectionSettings,
@@ -84,14 +84,14 @@ internal fun serializeProfiles(profiles: List<HostProfile>): String {
     return "[${arr.joinToString(",")}]"
 }
 
-/** 主机配置仓库:首次使用时把老单配置迁移为 default。 */
+/** Host-profile store: on first use, migrate the legacy single config to default. */
 class HostProfileStore(private val store: SettingsStore) {
 
     val state: Flow<HostProfilesState> = store.profilesPreferences.map { p ->
         var profiles = parseProfiles(p[PROFILE_LIST_KEY])
         if (profiles.isEmpty()) {
-            // 老用户迁移:同一份快照里的单配置 → default,避免升级丢配置。
-            // (原先在这里 runBlocking 第二次读 DataStore,会在主线程阻塞)
+            // Legacy migrate: single config in the same snapshot → default so upgrades keep settings.
+            // (This used to runBlocking a second DataStore read here, which blocked the main thread.)
             val legacy = store.legacySettings(p)
             if (legacy.host.isNotBlank() || legacy.user.isNotBlank() || legacy.privateKey.isNotBlank()) {
                 profiles = listOf(HostProfile("default", legacy))
@@ -103,7 +103,7 @@ class HostProfileStore(private val store: SettingsStore) {
     suspend fun saveProfile(name: String, settings: ConnectionSettings) {
         val cur = state.first()
         val profileName = name.trim().ifBlank { "default" }
-        // 身份 = host:port:user:同一台机器改名 = 原地重命名,不产生重复条目
+        // Identity = host:port:user; renaming the same machine is in-place, no duplicate entries.
         val identity = profileIdentity(settings)
         val updated = cur.profiles
             .filter { profileIdentity(it.settings) != identity || it.name == profileName }
@@ -138,7 +138,7 @@ class HostProfileStore(private val store: SettingsStore) {
         }
     }
 
-    /** JSON 序列化 sanity check:有 profiles 时必须能 round-trip,否则说明手写序列化坏了。 */
+    /** JSON serialization sanity check: non-empty profiles must round-trip, or the hand-rolled serializer is broken. */
     fun selfCheck(profiles: List<HostProfile>): Boolean {
         if (profiles.isEmpty()) return true
         val back = parseProfiles(serializeProfiles(profiles))

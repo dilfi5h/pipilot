@@ -23,11 +23,12 @@ import dev.pipilot.app.R
 import dev.pipilot.app.log.AppLog
 
 /**
- * 切后台时抬高进程优先级,并持有 PARTIAL_WAKE_LOCK + WifiLock。
- * 不持有连接本身(仍由 PiViewModel 管);到期或回前台后自行 stop。
+ * Raise process priority in the background and hold PARTIAL_WAKE_LOCK + WifiLock.
+ * Does not own the connection itself (PiViewModel still does); stops on expiry or return to foreground.
  *
- * 仅挂通知不够:不少机型上 FGS 通知在,CPU/无线电仍会被打盹。
- * WakeLock 保 CPU;WifiLock 尽量保住 Wi‑Fi 无线电(蜂窝路径仍依赖 OEM/SSH 心跳)。
+ * A notification alone is not enough: on many OEM builds the FGS notification stays up
+ * while CPU/radio still doze. WakeLock keeps the CPU; WifiLock tries to keep Wi‑Fi
+ * (cellular still depends on OEM / SSH keepalives).
  */
 class ConnectionKeepAliveService : Service() {
 
@@ -48,7 +49,7 @@ class ConnectionKeepAliveService : Service() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (intent == null) {
-            // START_STICKY 进程死后会用 null intent 拉起服务;SSH 在 ViewModel 里,这里只剩空通知
+            // START_STICKY would restart the service with a null intent after process death; SSH lives in the ViewModel, so this would be an empty notification
             AppLog.w(TAG, "null intent sticky restart; no SSH in service, stopping")
             stopSelf()
             return START_NOT_STICKY
@@ -122,7 +123,7 @@ class ConnectionKeepAliveService : Service() {
     private fun acquireWifiLock() {
         if (wifiLock?.isHeld == true) return
         val wm = applicationContext.getSystemService(WifiManager::class.java) ?: return
-        // 统一用 FULL_HIGH_PERF(保 SSH 长连接不断链);LOW_LATENCY 语义是低时延实时场景且 API 34 起废弃
+        // Always FULL_HIGH_PERF (keep long-lived SSH up); LOW_LATENCY is for realtime and is deprecated from API 34
         val mode = WifiManager.WIFI_MODE_FULL_HIGH_PERF
         wifiLock = wm.createWifiLock(mode, "pipilot:ssh_wifi").apply {
             setReferenceCounted(false)
@@ -183,7 +184,7 @@ class ConnectionKeepAliveService : Service() {
         const val CHANNEL_ID = "connection_keepalive"
         const val NOTIFICATION_ID = 1001
         const val ACTION_STOP = "dev.pipilot.app.keepalive.STOP"
-        /** 后台短时保活窗口:10 分钟。*/
+        /** Short background keep-alive window: 10 minutes. */
         const val KEEP_ALIVE_MS = 10 * 60_000L
 
         fun start(context: Context) {

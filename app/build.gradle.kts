@@ -7,8 +7,8 @@ plugins {
     alias(libs.plugins.kotlin.serialization)
 }
 
-// 签名密钥固定在仓库根的 pipilot-release.keystore(凭据在 keystore.properties,均不入 git)。
-// 固定密钥是为了让新旧 APK 能互相覆盖安装:Android 拒绝安装与已装版本签名不同的包。
+// Signing key is pinned at repo-root pipilot-release.keystore (credentials in keystore.properties; neither is in git).
+// A fixed key lets new APKs overwrite old installs: Android refuses a package signed differently from the installed one.
 val keystoreProps = Properties().apply {
     val f = rootProject.file("keystore.properties")
     if (f.exists()) f.inputStream().use { load(it) }
@@ -33,9 +33,8 @@ android {
         applicationId = "dev.pipilot.app"
         minSdk = 26
         targetSdk = 35
-        // 手工版本号:实机测 OK 之前每次发验证包 +1,App 内标题栏可见,防止旧包覆盖装不上的糊涂账
-        versionCode = 15
-        versionName = "0.0.15"
+        versionCode = 16
+        versionName = "0.0.16"
     }
 
     buildTypes {
@@ -88,7 +87,7 @@ dependencies {
     implementation(libs.kotlinx.serialization.json)
     implementation("org.bouncycastle:bcprov-jdk18on:1.80")
     implementation(libs.sshj) {
-        // sshj 传递依赖里同时带了 bcprov-jdk15on 和 bcprov-jdk18on,排除旧版避免重复类
+        // sshj transitively pulls both bcprov-jdk15on and bcprov-jdk18on; exclude the old module to avoid duplicate classes
         exclude(group = "org.bouncycastle", module = "bcprov-jdk15on")
     }
 

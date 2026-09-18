@@ -26,17 +26,17 @@ import java.io.OutputStreamWriter
 import java.util.concurrent.ConcurrentHashMap
 
 /**
- * pi RPC 客户端:负责严格 JSONL 读写、请求-响应关联、事件分发。
+ * pi RPC client: strict JSONL I/O, request/response correlation, event fan-out.
  *
- * 协议要点(docs/rpc.md#framing):
- * - 只按 \n 分帧,容忍行尾 \r;绝不能用按 Unicode 分隔符断行的通用行读取器
- * - 每行一个 JSON 对象;stdin 每条命令一行
+ * Protocol notes (docs/rpc.md#framing):
+ * - Frame on \n only; tolerate a trailing \r; never use a generic line reader that splits on Unicode separators
+ * - One JSON object per line; one command per stdin line
  */
 class PiRpcClient(
     private val stdin: java.io.OutputStream,
     private val stdout: java.io.InputStream,
     private val stderr: java.io.InputStream,
-    /** 阻塞等待远端命令退出并返回退出码;null 表示拿不到(老通道)。用于诊断"命令启动即退"。 */
+    /** Block until the remote command exits and return its code; null if unavailable (legacy channel). Used to diagnose "exited on start". */
     private val remoteExit: (suspend () -> Int?)? = null,
     private val scope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.IO),
 ) {
@@ -56,20 +56,21 @@ class PiRpcClient(
     val events: SharedFlow<PiEvent> = _events.asSharedFlow()
 
     private val _lines = MutableSharedFlow<String>(extraBufferCapacity = 256, onBufferOverflow = BufferOverflow.DROP_OLDEST)
-    /** 原始行流,调试用。*/
+    /** Raw line stream for debugging. */
     val rawLines: SharedFlow<String> = _lines.asSharedFlow()
 
     private val pending = ConcurrentHashMap<String, kotlinx.coroutines.CompletableDeferred<PiResponse>>()
 
     /**
-     * 最近一次收到任何下行数据(响应/事件/stderr)的时刻。
-     * 判定"链路还行不行"时不能只看某个请求是否回包:agent 长工具调用期间,命令的响应可能
-     * 被拖住,但事件仍在流 → 有下行就等于链路活着,避免误判重连把正在跑的 agent 掐死。
+     * Timestamp of the latest inbound data (response / event / stderr).
+     * Do not judge link health by whether one request answered: during a long tool call the
+     * command response may stall while events still flow → inbound traffic means the link is
+     * alive, so we avoid a false reconnect that kills a running agent.
      */
     @Volatile
     private var lastInboundAt = System.currentTimeMillis()
     val lastInboundAtMs: Long get() = lastInboundAt
-    /** 本地拆除时置位,避免 close() 再发 Closed 把 VM 推进第二轮重连。*/
+    /** Set during local teardown so close() does not emit Closed and push the VM into a second reconnect loop. */
     @Volatile
     private var suppressClosedNotify = false
 
@@ -79,7 +80,7 @@ class PiRpcClient(
     private var stderrJob: Job? = null
     private var exitJob: Job? = null
 
-    // stderr 尾巴:远端命令退出时的真实原因(shell 报错、pi 崩溃栈)在这里,断连时展示给用户
+    // stderr tail: the real reason the remote command exited (shell error, pi crash stack); shown on disconnect
     private val stderrTail = StringBuilder()
 
     private fun noteStderr(text: String) {
@@ -92,11 +93,11 @@ class PiRpcClient(
     private fun stderrTailText(): String =
         synchronized(stderrTail) { stderrTail.toString().trim() }
 
-    /** 标记连接关闭并快速失败所有未决请求;重复调用无害。 */
+    /** Mark the connection closed and fail all pending requests quickly; safe to call repeatedly. */
     private fun markClosed(reason: String?) {
         val cur = _connection.value
         if (cur is ConnectionState.Closed) {
-            // 已关闭:允许用更具体的原因覆盖通用原因,让用户看到 exit 码和 stderr
+            // Already closed: allow a more specific reason to replace a generic one so the user sees exit code / stderr
             if (reason != null && (cur.reason == null || cur.reason == "stdout closed") && !suppressClosedNotify) {
                 AppLog.i(TAG, "Closed reason upgraded: ${cur.reason} -> $reason")
                 _connection.value = ConnectionState.Closed(reason)
@@ -118,20 +119,20 @@ class PiRpcClient(
         readerJob = scope.launch { readLoop() }
         stderrJob = scope.launch { drainStderr() }
         exitJob = scope.launch {
-            // 等远端命令退出:pi 正常常驻时永远不返回;启动即退(未安装/崩溃)时在这里拿到真相
+            // Wait for remote exit: a healthy pi never returns; an immediate exit (not installed / crash) surfaces here
             val code = runCatching { remoteExit?.invoke() }.getOrNull() ?: return@launch
-            kotlinx.coroutines.delay(200) // 等 stderr 尾巴沉淀
+            kotlinx.coroutines.delay(200) // let the stderr tail settle
             val tail = stderrTailText()
             markClosed(
-                if (tail.isNotEmpty()) "远程命令退出(exit=$code): ${tail.take(300)}"
-                else "远程命令退出(exit=$code)",
+                if (tail.isNotEmpty()) "Remote command exited (exit=$code): ${tail.take(300)}"
+                else "Remote command exited (exit=$code)",
             )
         }
     }
 
     /**
-     * @param notify 为 false 时只拆通道、不发 Closed。VM 本地拆除(forceReconnect /
-     *   closeResources)已经自己进重连,再发 Closed 会叠第二轮循环。
+     * @param notify when false, tear down the channel without emitting Closed. Local VM teardown
+     *   (forceReconnect / closeResources) already enters reconnect; another Closed would stack a second loop.
      */
     suspend fun close(notify: Boolean = true) {
         if (!notify) suppressClosedNotify = true
@@ -148,16 +149,17 @@ class PiRpcClient(
     }
 
     /**
-     * 发送一条命令(已序列化的 JSON 单行)。
-     * 写失败(远端命令退出/通道被关)绝不抛给调用方:调用方多在 viewModelScope 主线程
-     * 协程里,异常会直接杀死进程(闪退)。这里降级为标记 Closed + 快失败未决请求,
-     * 由 VM 的连接状态监听走重连流程,并把 stderr 里的真实原因带给用户。
+     * Send one command (already a single-line JSON).
+     * Write failures (remote exited / channel closed) must not throw to the caller: callers often
+     * run on the viewModelScope main-thread coroutine, and an exception would kill the process.
+     * Degrade to markClosed + fail pending requests; the VM connection observer reconnects and
+     * surfaces the real stderr reason.
      */
     suspend fun sendLine(line: String) = withContext(Dispatchers.IO) {
         writerMutex.withLock {
             val w = writer ?: return@withLock
             try {
-                // 协议要求 LF 结尾;禁用平台换行符(Windows 上 \r\n 会破坏 JSONL)
+                // Protocol requires an LF terminator; never use the platform newline (Windows \r\n breaks JSONL)
                 w.write(line)
                 w.write("\n")
                 w.flush()
@@ -165,8 +167,8 @@ class PiRpcClient(
                 AppLog.e(TAG, "write failed: ${e.javaClass.simpleName}: ${e.message}; marking closed")
                 val tail = stderrTailText()
                 markClosed(
-                    if (tail.isNotEmpty()) "远程命令退出: ${tail.take(300)}"
-                    else "连接写入失败: ${e.message ?: e.javaClass.simpleName}",
+                    if (tail.isNotEmpty()) "Remote command exited: ${tail.take(300)}"
+                    else "Connection write failed: ${e.message ?: e.javaClass.simpleName}",
                 )
                 return@withLock
             }
@@ -174,12 +176,12 @@ class PiRpcClient(
         AppLog.d(TAG, ">> ${AppLog.redactCommand(line)}")
     }
 
-    /** 发送命令并等待对应 response(按 id 关联)。超时返回 null。*/
+    /** Send a command and wait for the matching response (correlated by id). Returns null on timeout. */
     suspend fun request(line: String, id: String, timeoutMs: Long = 60_000): PiResponse? {
         val deferred = kotlinx.coroutines.CompletableDeferred<PiResponse>()
         pending[id] = deferred
         val t0 = System.currentTimeMillis()
-        // 每条命令一条 D 级(只进内存):RPC 命令级别的噪音太大,会把断链瞬间的行挤出 800 行环形
+        // One D-level line per command (memory only): RPC command noise would push the disconnect moment out of the 800-line ring
         AppLog.d(TAG, ">> ${AppLog.redactCommand(line)}")
         try {
             sendLine(line)
@@ -190,7 +192,7 @@ class PiRpcClient(
             } else {
                 val dataKeys = (resp.data as? kotlinx.serialization.json.JsonObject)?.keys?.joinToString(",")
                 val detail = "<< response id=$id cmd=${resp.command} success=${resp.success} error=${resp.error} dataKeys=[$dataKeys] (${cost}ms)"
-                // 成功响应是噪音,失败才是证据
+                // Successful responses are noise; failures are evidence
                 if (resp.success) AppLog.d(TAG, detail) else AppLog.w(TAG, detail)
             }
             return resp
@@ -200,9 +202,9 @@ class PiRpcClient(
     }
 
     private suspend fun readLoop() {
-        // 手工按 \n 分帧:不能用 BufferedReader.readLine()(它按行终止符集合切分,
-        // 在某些实现下会把 U+2028/U+2029 当行尾,违反 pi 的 strict JSONL 语义)。
-        // 这里用 InputStreamReader 单字符读取 + 缓冲;JSONL 行通常较长,性能足够(事件频率 <100/s)。
+        // Frame manually on \n: do not use BufferedReader.readLine() (it splits on a set of
+        // terminators and some implementations treat U+2028/U+2029 as EOL, violating pi's strict JSONL).
+        // Use InputStreamReader with a buffer; JSONL lines are long enough that this is fine (<100 events/s).
         val reader = BufferedReader(InputStreamReader(stdout, Charsets.UTF_8), 64 * 1024)
         val sb = StringBuilder()
         val buf = CharArray(8192)
@@ -222,11 +224,12 @@ class PiRpcClient(
                 }
             }
             if (sb.isNotEmpty()) handleLine(sb.toString())
-            // stdout 关闭 = 远端命令退出。稍等一下让 stderr 尾巴和 exit 监听先到,
-            // 这样 Closed 原因能带上真实错误(如 "command not found: pi")而非泛泛的 stdout closed
+            // stdout closed = remote command exited. Wait briefly so the stderr tail and exit
+            // watcher arrive first, so Closed carries a real error (e.g. "command not found: pi")
+            // instead of a generic "stdout closed".
             kotlinx.coroutines.delay(400)
             val tail = stderrTailText()
-            markClosed(if (tail.isNotEmpty()) "远程命令退出: ${tail.take(300)}" else "stdout closed")
+            markClosed(if (tail.isNotEmpty()) "Remote command exited: ${tail.take(300)}" else "stdout closed")
         } catch (e: Exception) {
             AppLog.e(TAG, "readLoop failed: ${e.javaClass.simpleName}: ${e.message}")
             markClosed("${e.javaClass.simpleName}: ${e.message}")

@@ -1,180 +1,205 @@
-# PiPilot 设计文档
+# PiPilot design notes
 
-> PiPilot 是一个 Android 原生客户端,通过 pi.dev coding agent 的 RPC 模式,
-> 在手机上远程操控跑在你开发机/服务器上的 pi TUI。本文记录设计思路、
-> 关键实现方法和踩过的协议坑。协议参考:[docs/rpc.md](rpc.md)(自 pi 官方仓库同步)。
+> PiPilot is a native Android client that remote-controls the pi.dev coding agent
+> via RPC mode, so you can drive the pi TUI that runs on your development
+> machine/server from a phone. This document records design decisions, key
+> implementation notes, and protocol pitfalls. Protocol reference:
+> [docs/rpc.md](rpc.md) (synced from the upstream pi repo).
 
-## 1. 目标与约束
+## 1. Goals and constraints
 
-**目标**:把 pi 的核心体验——对话、工具执行过程、模型切换、会话管理——搬到手机上,
-并且不影响桌面 TUI 的使用(不是复刻 TUI,而是另一块"屏幕")。
+**Goal**: bring pi's core experience — conversation, tool execution, model
+switching, session management — onto the phone, without interfering with the
+desktop TUI (not a TUI clone; another "screen").
 
-**约束**:
+**Constraints**:
 
-- pi 是 Node 进程,TUI 直接跑在终端里;Android 没有原生 Node 运行时
-  (Termux 方案可行但安装链路复杂、后台保活差,被否决)。
-- pi 官方提供四种接入方式:交互 TUI / print+JSON / **RPC(stdio JSONL)** / SDK。
-  对非 Node 客户端,RPC 是唯一进程级稳定接口;SDK 需要 Node,print 模式无流式交互。
-- 手机端不应该承担 agent 的计算/网络(LLM API)职责,pi 应该跑在
-  网络环境好、有完整工具链(bash/git/编辑器)的机器上。
+- pi is a Node process whose TUI runs in a terminal; Android has no native Node
+  runtime (Termux is possible but the install path is fragile and background
+  keep-alive is poor, so it was rejected).
+- Upstream offers four integration modes: interactive TUI / print+JSON /
+  **RPC (stdio JSONL)** / SDK. For a non-Node client, RPC is the only stable
+  process-level interface; the SDK needs Node, and print mode has no streaming
+  interactivity.
+- The phone must not own agent compute/network (LLM API) duties; pi should run
+  on a machine with good networking and a full toolchain (bash/git/editors).
 
-## 2. 架构决策
+## 2. Architecture decisions
 
-### 2.1 远程机器 + SSH exec(而非本机 Termux / WebSocket 桥)
+### 2.1 Remote machine + SSH exec (not local Termux / WebSocket bridge)
 
-三个候选:
+Three candidates:
 
-| 方案 | 优点 | 缺点 |
+| Approach | Pros | Cons |
 |---|---|---|
-| **SSH exec 远程 pi** | 无需服务端组件;复用现有 SSH 基础设施;pi 原生跑在 Linux 机器 | 需要 SSH 库;断线恢复要自己做 |
-| Termux 本机 | 完全离线 | Node/Android 兼容链路脆弱;Android 后台限制;工程量大 |
-| WebSocket 桥接服务 | 多设备共享、推送友好 | 要额外写并部署一个常驻桥接组件 |
+| **SSH exec remote pi** | No server component; reuses existing SSH; pi runs natively on Linux | Needs an SSH library; reconnect is DIY |
+| Local Termux | Fully offline | Fragile Node/Android path; Android background limits; large engineering cost |
+| WebSocket bridge service | Multi-device sharing, push-friendly | Extra always-on bridge to write and deploy |
 
-选 SSH 的核心理由:**零服务端部署**——只要你有一台能 SSH 的机器、上面装了 pi,
-app 就能工作。SSH exec 通道本身就是全双工 stdin/stdout 管道,与 RPC 模式的
-stdio 接口天然对齐:
+SSH was chosen for **zero server deploy** — any SSH-able machine with pi
+installed is enough. An SSH exec channel is already a full-duplex stdin/stdout
+pipe and lines up naturally with RPC's stdio interface:
 
 ```
 ┌─────────────┐  SSH (sshj, exec channel)  ┌─────────────────────────┐
 │  PiPilot    │ ──── stdin (JSONL) ──────▶ │ pi --mode rpc           │
-│  (Android)  │ ◀─── stdout (JSONL) ────── │ (JSON 事件/响应流)        │
+│  (Android)  │ ◀─── stdout (JSONL) ────── │ (JSON event/response)   │
 └─────────────┘                            └─────────────────────────┘
 ```
 
-### 2.2 技术栈:Kotlin + Jetpack Compose(原生)
+### 2.2 Stack: Kotlin + Jetpack Compose (native)
 
-- JSONL 流处理、SSH(sshj)、协程 Flow 在 JVM 生态里都是成熟组件,不需要
-  platform channel 桥接(Flutter/RN 方案的隐性成本)。
-- 聊天 UI 是 Compose 的舒适区:LazyColumn + 流式文本 + 局部更新。
-- 包体积小(minSdk 26,无 WebView/JS 引擎)。
+- JSONL streaming, SSH (sshj), and coroutine Flow are mature on the JVM; no
+  platform-channel bridge cost like Flutter/RN.
+- Chat UI is a Compose comfort zone: LazyColumn + streaming text + local updates.
+- Small package (minSdk 26, no WebView/JS engine).
 
-### 2.3 分层
+### 2.3 Layers
 
 ```
-ui/        Compose 界面(PiScreen)+ PiViewModel(唯一状态出口)
-chat/      StreamReducer:RPC 事件流 → 可渲染条目(ChatItem)的归约器
-rpc/       PiProtocol(数据模型 + 命令构造)、PiRpcClient(JSONL 读写、请求-响应关联)
-ssh/       SshConnector:sshj 连接、auth(password/PEM)、exec 通道
-settings/  SettingsStore(Datastore 持久化连接配置)
+ui/        Compose UI (PiScreen) + PiViewModel (single state outlet)
+chat/      StreamReducer: RPC event stream → renderable ChatItem reduction
+rpc/       PiProtocol (models + command builders), PiRpcClient (JSONL I/O, request/response correlation)
+ssh/       SshConnector: sshj connect, auth (password/PEM), exec channel
+settings/  SettingsStore (DataStore persistence for connection config)
 ```
 
-依赖方向单向:`ui → chat → rpc ← ssh`。`PiViewModel` 负责把 ssh 通道和 rpc
-客户端装配起来(`connect()`),UI 层不接触任何 IO。
+Dependency direction is one-way: `ui → chat → rpc ← ssh`. `PiViewModel`
+assembles the SSH channel and RPC client (`connect()`); the UI layer never
+touches I/O.
 
-## 3. 协议层实现要点
+## 3. Protocol implementation notes
 
-### 3.1 严格 JSONL 分帧(pi 文档明确要求的坑)
+### 3.1 Strict JSONL framing (the pitfall the pi docs call out)
 
-pi 的 RPC 模式使用 **strict JSONL**:只认 `\n` 作为记录分隔符,但允许行尾带
-`\r`。经典错误是使用 `BufferedReader.readLine()` ——它按"行终止符集合"切行,
-部分实现会把 `U+2028`/`U+2029`(合法的 JSON 字符串内容)当行尾,导致
-LLM 输出包含这类字符时消息被截断、JSON 解析失败。
+pi RPC uses **strict JSONL**: only `\n` is a record delimiter, though a trailing
+`\r` is accepted. The classic bug is `BufferedReader.readLine()` — it splits on
+a set of line terminators, and some implementations treat `U+2028`/`U+2029`
+(legal inside JSON strings) as EOL, so LLM output containing those characters
+truncates messages and breaks JSON parsing.
 
-实现(`PiRpcClient.readLoop`):手工按 `\n` 分帧——块读取(8K char buffer)
-+ 逐字符扫描,遇到 `\n` 即切出一条记录,`removeSuffix("\r")` 后解析。
-写方向同理:每条命令显式 `\n` 结尾,**禁止** `newLine()`(Windows 平台会写成
-`\r\n`,虽然 pi 容忍尾部 `\r`,但不要赌所有版本的行为)。
+Implementation (`PiRpcClient.readLoop`): frame by hand on `\n` — block reads
+(8K char buffer) + char scan, cut on `\n`, `removeSuffix("\r")`, then parse.
+Writes likewise: every command ends with an explicit `\n`; never call
+`newLine()` (Windows would write `\r\n`; pi tolerates a trailing `\r`, but do not
+bet on every version).
 
-### 3.2 请求-响应关联
+### 3.2 Request/response correlation
 
-所有命令支持可选 `id`;带 `id` 的命令会收到带相同 `id` 的
-`{"type":"response",...}`。事件流与响应共享同一条 stdout,所以:
+All commands support an optional `id`; a command with an `id` gets a
+`{"type":"response",...}` with the same `id`. Events and responses share stdout, so:
 
-- `PiRpcClient` 维护 `ConcurrentHashMap<String, CompletableDeferred<PiResponse>>`;
-- `request(line, id, timeout)` 发送前注册 deferred,response 到达时按 id complete;
-- 没带 id 的命令(如 `steer`/`abort`)fire-and-forget,结果通过事件体现;
-- stdout 关闭或超时会让所有 pending deferred 以失败收场,不会悬挂。
+- `PiRpcClient` keeps a `ConcurrentHashMap<String, CompletableDeferred<PiResponse>>`;
+- `request(line, id, timeout)` registers the deferred before send and completes it on matching response;
+- commands without an id (e.g. `steer`/`abort` historically) are fire-and-forget and show up via events;
+- stdout close or timeout fails all pending deferreds so nothing hangs.
 
-### 3.3 流式拼装(没有快照,只有增量)
+### 3.3 Streaming assembly (no snapshot, only deltas)
 
-`message_update` 事件**不携带累计消息快照**,只有 delta 子事件
-(`text_delta`/`thinking_delta`/`toolcall_start|delta|end`),需要客户端按
-`contentIndex` 自行拼装。`StreamReducer` 的状态机:
+`message_update` events **do not carry a cumulative message snapshot**, only
+delta sub-events (`text_delta`/`thinking_delta`/`toolcall_start|delta|end`).
+Clients must assemble by `contentIndex`. `StreamReducer` state machine:
 
-- `agent_start` 重置 live 缓冲(正文 + 思考 + toolcall 参数表);
-- `text_delta` 追加、`text_end` 用权威全文覆盖(防止丢 delta 后漂移);
-- `message_end.message` 是最终态,据此固化一条 `AssistantText(final)`;
-- `tool_execution_start` 时固化当前 live 文本并清空——因为后续正文属于
-  下一段输出,不清会重复渲染;
-- **`tool_execution_update.partialResult` 是累计输出**(不是增量),直接
-  整卡替换,这也是文档建议的显示方式。
+- `agent_start` resets the live buffer (body + thinking + toolcall args map);
+- `text_delta` appends; `text_end` overwrites with the authoritative full text (avoids drift after dropped deltas);
+- `message_end.message` is final; commit an `AssistantText(final)` from it;
+- on `tool_execution_start`, commit current live text and clear it — later body
+  belongs to the next segment, and clearing prevents duplicate rendering;
+- **`tool_execution_update.partialResult` is cumulative output** (not a delta);
+  replace the card wholesale, which is also the docs' recommended display.
 
-### 3.4 UI 条目归约(merge 策略)
+### 3.4 UI item reduction (merge strategy)
 
-`StreamReducer` 产出的是"增量操作",`PiViewModel.mergeItems` 把它合并进
-聊天列表:`key == "live"` 的气泡原地替换;`ToolCard` 按 `toolCallId` 原地更新
-(args 保留首发值,update 事件不带 args);`BashOutput` 追加 delta;
-其余追加。这保证 LazyColumn 以 `key` 做 diff 时不会整表重组。
+`StreamReducer` emits "delta ops"; `PiViewModel.mergeItems` folds them into the
+chat list: replace bubbles with `key == "live"` in place; update `ToolCard`s by
+`toolCallId` in place (keep first args; update events omit args); append
+`BashOutput` deltas; append everything else. That keeps LazyColumn `key` diffs
+from rebuilding the whole table.
 
-### 3.5 流式中发送消息
+### 3.5 Sending while streaming
 
-RPC 规定:agent 正在 streaming 时,`prompt` 必须显式带
-`streamingBehavior`(否则返回错误)。PiPilot 的策略:空闲时发裸 `prompt`;
-流式中发 `streamingBehavior: "followUp"`(等 agent 完整跑完再送达),把
-"打断"的决定权留给用户——输入框在流式期间显示"排队(follow-up)",
-同时提供独立的 abort(⏹)按钮发 `abort` 命令。`queue_update` 事件驱动
-"排队中 N 条"提示。
+RPC requires: while the agent is streaming, `prompt` must declare
+`streamingBehavior` (otherwise the command errors). PiPilot when idle sends a
+bare `prompt`; while streaming the composer splits into two actions:
 
-### 3.6 扩展 UI 子协议
+- **Steer** (`steer`): delivered after current tools finish, before the next LLM call — used to correct a wrong turn
+- **Queue** (`follow_up`): processed only after the agent fully settles
 
-pi 扩展可通过 `ctx.ui.select()/confirm()/input()` 弹窗,RPC 模式下它变成
-`extension_ui_request` 事件,**阻塞等待** stdin 上的 `extension_ui_response`。
-PiPilot 把它映射成原生 `AlertDialog`(`PiViewModel` 拦截该事件转成
-`UiDialog` state),三种应答形态严格按文档:`value`(select/input)、
-`confirmed`(confirm)、`cancelled`(任意)。fire-and-forget 类
-(notify/setStatus/setWidget 等)MVP 暂时只显示扩展错误,不逐条建模。
+The stop button matches TUI Esc: `clear_queue` first to recover unsent text into
+the composer, then `abort`. Abort alone does not clear the queue; remaining
+queued messages still run after abort. `queue_update` drives the "Pending"
+banner at the bottom of the list; the banner's "Recall" clears the queue without
+aborting the current turn.
 
-## 4. SSH 层
+### 3.6 Extension UI sub-protocol
 
-- sshj 0.40 + 显式注册完整版 BouncyCastle(Android 内置的是裁剪版 BC,
-  Ed25519/PKCS8 解析会缺类)。
-  依赖注意:sshj 同时传递 `bcprov-jdk15on` 和 `bcprov-jdk18on`,必须
-  exclude 旧模块,否则重复类编译失败。
-- 认证支持密码和 PEM 私钥(`PKCS8KeyFile`,口令可选)。
-- `exec` 通道启动 `(cd <workdir> &&) <piCommand>`,默认
-  `pi --mode rpc`;stderr 持续 drain 并打日志(避免缓冲区塞死阻塞 pi)。
-- host key 校验目前是 `PromiscuousVerifier`(信任所有)。个人内网可接受;
-  公网使用建议加 fingerprint 固定(见 Roadmap)。
-- 会话列表不走 RPC,直接 `runQuick` 执行可移植 `find`+`stat` 脚本,
-  按 mtime 排序后取最近 30 个,再用 `switch_session` 加载。
+pi extensions can pop `ctx.ui.select()/confirm()/input()`. In RPC mode that
+becomes an `extension_ui_request` event that **blocks** until an
+`extension_ui_response` arrives on stdin. PiPilot maps that to a native
+`AlertDialog` (`PiViewModel` turns the event into `UiDialog` state). The three
+reply shapes follow the docs strictly: `value` (select/input), `confirmed`
+(confirm), `cancelled` (any). Fire-and-forget methods (notify/setStatus/setWidget,
+etc.) only surface extension errors in the MVP and are not modeled one-by-one.
 
-## 5. 状态与生命周期
+## 4. SSH layer
 
-- 单一 `UiState`(StateFlow)驱动全 UI;`PiViewModel` 持有 ssh 会话和 rpc
-  client,ViewModel 销毁时断开通道。
-- 断线(stdout EOF / IO 异常 / 心跳超时 / 网络丢失)→ 立刻拆掉旧 SSH,
-  指数退避重连(2s→30s)。重连期间 UI 保留聊天列表 + 横幅,成功后用
-  `pi --mode rpc --session <path>` 恢复,并以 `get_entries` 全量重建历史。
-- 后台:ON_PAUSE 启 10 分钟 FGS(WakeLock+WifiLock),心跳加密到 20s;
-  进程被杀后 FGS 不 sticky 复活(连接在 ViewModel 里,空服务没有 SSH)。
-- RPC 进程随 SSH 通道生灭:断开即远端 pi 退出。会话文件持久化在远端,
-  重连可无损恢复,这是选择"无状态连接 + 远端 session 文件"的原因。
+- sshj 0.40 + an explicitly registered full BouncyCastle (Android's built-in BC
+  is trimmed; Ed25519/PKCS8 parsing would miss classes).
+  Dependency note: sshj transitively pulls both `bcprov-jdk15on` and
+  `bcprov-jdk18on`; the old module must be excluded or duplicate classes fail the build.
+- Auth supports password and PEM private key (`PKCS8KeyFile`, optional passphrase).
+- The `exec` channel starts `(cd <workdir> &&) <piCommand>`, default
+  `pi --mode rpc`; stderr is drained continuously and logged (so a full buffer
+  cannot block pi).
+- Host-key verification is currently `PromiscuousVerifier` (trust all). Acceptable
+  on a personal LAN; public internet use should pin a fingerprint (see Roadmap).
+- Session listing does not go through RPC; a portable `find`+`stat` script runs
+  via `runQuick`, sorts by mtime, takes the latest 30, then loads with
+  `switch_session`.
 
-## 6. 安全考量
+## 5. State and lifecycle
 
-- 凭据(密码/PEM/口令)存于 app 私有 Datastore,`allowBackup=false`,
-  不出设备。
-- 密码字段不在 RPC 日志打印(命令走 `AppLog.redactCommand`);连接日志仍含
-  `user@host:port`(排障需要),不含密码/PEM。
-- 已知妥协:PromiscuousVerifier(见 §4)。改进路径:设置页粘贴
-  `sha256:<fingerprint>`,sshj 的 `FingerprintVerifier` 一行可换。
+- A single `UiState` (StateFlow) drives the whole UI; `PiViewModel` owns the SSH
+  session and RPC client and tears the channel down when the ViewModel is cleared.
+- Disconnect (stdout EOF / IO error / heartbeat timeout / network loss) → tear
+  down the old SSH immediately, then exponential-backoff reconnect (2s→30s).
+  During reconnect the UI keeps the chat list + banner; on success resume with
+  `pi --mode rpc --session <path>` and rebuild history fully via `get_entries`.
+- Background: ON_PAUSE starts a 10-minute FGS (WakeLock+WifiLock) and tightens
+  the heartbeat to 20s; if the process is killed the FGS is not sticky-restarted
+  (the connection lives in the ViewModel; an empty service has no SSH).
+- The RPC process lives and dies with the SSH channel: disconnect exits remote
+  pi. Session files persist remotely, so reconnect can restore without loss —
+  that is why the design is "stateless connection + remote session files".
 
-## 7. 打包与发布
+## 6. Security considerations
 
-本地构建一次约 1–4 分钟(Windows 冷缓存),正式发布走 GitHub Actions
-(`.github/workflows/release.yml`):推 `v*` tag 自动用 JDK17 + Gradle 8.9 +
-android-actions/setup-android 构建 debug APK,上传 workflow artifact,并以
-softprops/action-gh-release 附到 GitHub Release,release notes 自动生成。
-`gradle-wrapper` 有意不入库(本机有预装 Gradle;CI 由 setup-gradle 提供确定
-版本),仓库更干净,也避免 wrapper jar 的二进制 review 问题。
+- Credentials (password/PEM/passphrase) live in the app-private DataStore with
+  `allowBackup=false` and never leave the device.
+- Password fields are not printed in RPC logs (commands go through
+  `AppLog.redactCommand`); connection logs still include `user@host:port`
+  (needed for debugging) but not password/PEM.
+- Known compromise: PromiscuousVerifier (see §4). Improvement path: paste
+  `sha256:<fingerprint>` in settings and swap in sshj's `FingerprintVerifier`.
+
+## 7. Packaging and release
+
+A local build takes about 1–4 minutes (cold cache on Windows). Official releases
+go through GitHub Actions (`.github/workflows/release.yml`): pushing a `v*` tag
+builds a debug APK with JDK17 + Gradle 8.9 + android-actions/setup-android,
+uploads a workflow artifact, and attaches it to a GitHub Release via
+softprops/action-gh-release with auto-generated notes. `gradle-wrapper` is
+intentionally not in the repo (local Gradle is preinstalled; CI gets a pinned
+version from setup-gradle), which keeps the repo cleaner and avoids reviewing a
+wrapper jar binary.
 
 ## 8. Roadmap
 
-- [x] 断线自动重连 + 指数退避
-- [x] `get_entries` 历史同步(重连全量重建)
-- [x] 图片附件(`prompt.images`,ImageContent base64)
-- [x] 通知栏短时保活(10 分钟 FGS) / 多主机配置
-- [ ] host key 指纹固定(FingerprintVerifier + 设置页)
-- [ ] 会话树:`get_tree`/`get_fork_messages`/`fork`/`clone`(对应 TUI /tree)
-- [ ] `export_html` + 手机端预览
-- [ ] 凭据加密存储 / release 签名构建走 CI
+- [x] Auto reconnect with exponential backoff
+- [x] `get_entries` history sync (full rebuild on reconnect)
+- [x] Image attachments (`prompt.images`, ImageContent base64)
+- [x] Short notification keep-alive (10-minute FGS) / multi-host profiles
+- [ ] Host-key fingerprint pinning (FingerprintVerifier + settings)
+- [ ] Session tree: `get_tree` / `get_fork_messages` / `fork` / `clone` (TUI `/tree`)
+- [ ] `export_html` + on-phone preview
+- [ ] Encrypted credential storage / signed release builds in CI

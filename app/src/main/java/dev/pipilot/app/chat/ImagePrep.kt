@@ -7,7 +7,7 @@ import android.util.Base64
 import dev.pipilot.app.log.AppLog
 import java.io.ByteArrayOutputStream
 
-/** MIME 与 base64,附带小缩略图供输入框预览。 */
+/** MIME plus base64, with a small thumbnail for the composer preview. */
 data class PreparedImage(
     val base64: String,
     val mimeType: String,
@@ -18,10 +18,12 @@ data class PreparedImage(
 private const val TAG = "ImagePrep"
 
 /**
- * 将用户选取的图片压成远端模型可接受的大小:统一转 JPEG(截图的 PNG 原样传会到
- * 4-8MB base64,provider 必挂),最长边 1568(视觉模型推荐上限),质量 82。
- * 字节一次性读入内存再解码,避免部分相册 URI 不允许二次打开流。
- * 所有失败路径都打日志:没有日志就没法在实机上定位"读取失败"。
+ * Compress a user-picked image to a size remote models accept: always JPEG
+ * (raw PNG screenshots become 4–8MB of base64 and providers reject them),
+ * longest side 1568 (vision-model recommended cap), quality 82.
+ * Bytes are read into memory once then decoded, because some gallery URIs
+ * cannot be opened a second time. Every failure path is logged so "read failed"
+ * can be diagnosed on a real device.
  */
 fun prepareImageForUpload(context: Context, uri: Uri, maxSide: Int = 1568): PreparedImage? {
     val resolver = context.contentResolver
@@ -39,8 +41,8 @@ fun prepareImageForUpload(context: Context, uri: Uri, maxSide: Int = 1568): Prep
     val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
     BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
     if (bounds.outWidth <= 0 || bounds.outHeight <= 0) {
-        // 解码器不认这个格式(如老系统上的 HEIC):mime 为 null,原始字节再大也没用
-        AppLog.e(TAG, "decode bounds failed: mime=${bounds.outMimeType} bytes=${bytes.size} — 格式本机解码器不支持?")
+        // Decoder does not recognize this format (e.g. HEIC on older OS): mime is null, raw size does not help
+        AppLog.e(TAG, "decode bounds failed: mime=${bounds.outMimeType} bytes=${bytes.size} — format unsupported by local decoder?")
         return null
     }
     val longest = maxOf(bounds.outWidth, bounds.outHeight).coerceAtLeast(1)
@@ -62,7 +64,7 @@ fun prepareImageForUpload(context: Context, uri: Uri, maxSide: Int = 1568): Prep
             AppLog.e(TAG, "jpeg compress produced 0 bytes")
             return null
         }
-        // 输入框预览用的小缩略图(约 128px)
+        // Small thumbnail for the composer (~128px)
         val thumbScale = maxOf(1, maxOf(bitmap.width, bitmap.height) / 128)
         val scaled = android.graphics.Bitmap.createScaledBitmap(
             bitmap,
@@ -70,7 +72,7 @@ fun prepareImageForUpload(context: Context, uri: Uri, maxSide: Int = 1568): Prep
             (bitmap.height / thumbScale).coerceAtLeast(1),
             true,
         )
-        // createScaledBitmap 在已足够小时可能返回原图;后面要 recycle 原图,必须拷一份给缩略图
+        // createScaledBitmap may return the original when already small; we recycle the original, so copy for the thumbnail
         val thumbnail = if (scaled === bitmap) {
             bitmap.copy(bitmap.config ?: android.graphics.Bitmap.Config.ARGB_8888, false) ?: scaled
         } else scaled
