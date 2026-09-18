@@ -186,12 +186,12 @@ etc.) only surface extension errors in the MVP and are not modeled one-by-one.
 
 A local build takes about 1–4 minutes (cold cache on Windows). Official releases
 go through GitHub Actions (`.github/workflows/release.yml`): pushing a `v*` tag
-builds a debug APK with JDK17 + Gradle 8.9 + android-actions/setup-android,
-uploads a workflow artifact, and attaches it to a GitHub Release via
-softprops/action-gh-release with auto-generated notes. `gradle-wrapper` is
-intentionally not in the repo (local Gradle is preinstalled; CI gets a pinned
-version from setup-gradle), which keeps the repo cleaner and avoids reviewing a
-wrapper jar binary.
+builds a signed release APK (`assembleRelease`, minify/shrink on) with JDK17 +
+Gradle 8.9 + android-actions/setup-android, uploads a workflow artifact, and
+attaches it to a GitHub Release via softprops/action-gh-release with
+auto-generated notes. `gradle-wrapper` is intentionally not in the repo (local
+Gradle is preinstalled; CI gets a pinned version from setup-gradle), which keeps
+the repo cleaner and avoids reviewing a wrapper jar binary.
 
 ## 8. Roadmap
 
@@ -202,4 +202,5 @@ wrapper jar binary.
 - [ ] Host-key fingerprint pinning (FingerprintVerifier + settings)
 - [ ] Session tree: `get_tree` / `get_fork_messages` / `fork` / `clone` (TUI `/tree`)
 - [ ] `export_html` + on-phone preview
-- [ ] Encrypted credential storage / signed release builds in CI
+- [x] Signed release builds in CI (`assembleRelease`)
+- [ ] Encrypted credential storage

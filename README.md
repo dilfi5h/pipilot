@@ -10,7 +10,7 @@ and session management onto your phone.
 **Option 1 (recommended): GitHub Releases** — pushing a `v*` tag makes CI build and publish:
 
 - Latest release: https://github.com/dilfi5h/pipilot/releases/latest
-- Or download `PiPilot-vX.Y.Z-debug.apk` from this repo's Releases page
+- Or download `PiPilot-vX.Y.Z-release.apk` from this repo's Releases page
 
 **Option 2: Actions artifact** — any commit can provide an APK under
 [Actions → Build & Release APK](https://github.com/dilfi5h/pipilot/actions/workflows/release.yml).
@@ -18,8 +18,8 @@ and session management onto your phone.
 **Option 3: Local build** (JDK 17 + Android SDK 35 + Gradle 8.9):
 
 ```bash
-gradle assembleDebug   # or ./gradlew if the repo has a wrapper
-# Output: app/build/outputs/apk/debug/app-debug.apk
+gradle assembleRelease   # or ./gradlew if the repo has a wrapper
+# Output: app/build/outputs/apk/release/app-release.apk
 ```
 
 ## How it works

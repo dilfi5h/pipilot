@@ -43,12 +43,12 @@ jobs:
           echo "$KEYSTORE_BASE64" | base64 -d > pipilot-release.keystore
           echo "$KEYSTORE_PROPERTIES" > keystore.properties
 
-      - name: Build debug APK
-        run: gradle assembleDebug --no-daemon --stacktrace
+      - name: Build release APK
+        run: gradle assembleRelease --no-daemon --stacktrace
 
       - name: Verify signing cert (fail build on mismatch)
         run: |
-          CERT=$(./tools/apk-cert-sha256.sh app/build/outputs/apk/debug/app-debug.apk)
+          CERT=$(./tools/apk-cert-sha256.sh app/build/outputs/apk/release/app-release.apk)
           echo "cert sha256: $CERT"
           [ "$CERT" = "380325ded8f9ed0144ec77c022e73b49c1c1661dc6c717e848e9a9e5bdcd6f53" ]
 
@@ -56,18 +56,17 @@ jobs:
         run: |
           # A branch name with / cannot be used as a filename (cp treats it as a directory); tags usually have no /, replacement is harmless
           SAFE_REF="${GITHUB_REF_NAME//\//-}"
-          cp app/build/outputs/apk/debug/app-debug.apk \
-             PiPilot-${SAFE_REF}-debug.apk
+          cp app/build/outputs/apk/release/app-release.apk PiPilot-${SAFE_REF}-release.apk
 
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
           name: PiPilot-APK
-          path: PiPilot-*-debug.apk
+          path: PiPilot-*-release.apk
 
       - name: Create GitHub Release (tag builds only)
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
-          files: PiPilot-*-debug.apk
+          files: PiPilot-*-release.apk
           generate_release_notes: true
