@@ -59,3 +59,20 @@ sealed interface ChatItem {
     @Immutable
     data class SystemNote(val text: String, override val key: String) : ChatItem
 }
+
+/** Plain text for the per-item Copy button. System selection still copies a highlight. */
+fun ChatItem.copyText(): String? = when (this) {
+    is ChatItem.UserText -> text.takeIf { it.isNotBlank() }
+    is ChatItem.AssistantText -> text.takeIf { it.isNotBlank() }
+    is ChatItem.ToolCard -> buildString {
+        append(toolName)
+        argsSummary?.takeIf { it.isNotBlank() }?.let { append('\n').append(it) }
+        output?.takeIf { it.isNotBlank() }?.let { append('\n').append(it) }
+    }.takeIf { it.isNotBlank() }
+    is ChatItem.BashOutput -> buildString {
+        command?.takeIf { it.isNotBlank() }?.let { append("$ ").append(it).append('\n') }
+        append(output)
+    }.trim().takeIf { it.isNotEmpty() }
+    is ChatItem.SystemNote -> text.takeIf { it.isNotBlank() }
+    is StreamReducer.RemoveLive -> null
+}

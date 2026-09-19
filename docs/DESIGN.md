@@ -56,6 +56,10 @@ pipe and lines up naturally with RPC's stdio interface:
   `scrollToItem(lastIndex)` at offset 0, so a tall live bubble does not snap
   its start to the top of the viewport on every token. User drags pause
   follow; the jump-to-bottom FAB resumes it.
+  Copy is split from system selection: each finished bubble has its own
+  `SelectionContainer` for highlights; a Copy icon lives in `DisableSelection`
+  chrome (timestamp row / code-block header) so a tap never starts a selection.
+  Live streaming bubbles stay unselectable because tokens rebuild the item.
 - Small package (minSdk 26, no WebView/JS engine).
 
 ### 2.3 Layers

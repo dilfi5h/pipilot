@@ -32,6 +32,7 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.text.selection.DisableSelection
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
@@ -91,8 +92,10 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLifecycleOwner
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
@@ -103,6 +106,7 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import dev.pipilot.app.chat.ChatItem
 import dev.pipilot.app.chat.MarkdownText
+import dev.pipilot.app.chat.copyText
 import dev.pipilot.app.keepalive.ConnectionKeepAliveService
 import dev.pipilot.app.log.AppLog
 import dev.pipilot.app.rpc.PiModel
@@ -486,33 +490,31 @@ private fun ChatList(ui: UiState, onClearQueue: () -> Unit, modifier: Modifier =
         }
     }
     Box(modifier) {
-        SelectionContainer(Modifier.fillMaxSize()) {
-            LazyColumn(
-                state = listState,
-                modifier = Modifier.fillMaxSize(),
-                contentPadding = androidx.compose.foundation.layout.PaddingValues(12.dp),
-                verticalArrangement = Arrangement.spacedBy(8.dp),
-            ) {
-                items(ui.items, key = { it.key }) { item ->
-                    when (item) {
-                        is ChatItem.UserText -> UserBubble(item)
-                        is ChatItem.AssistantText -> AssistantBubble(item)
-                        is ChatItem.ToolCard -> ToolCard(item)
-                        is ChatItem.BashOutput -> BashCard(item)
-                        is ChatItem.SystemNote -> Text(
-                            item.text,
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            modifier = Modifier.alpha(0.8f),
-                        )
-                        // RemoveLive is consumed only in the VM and never enters the list; ignore as a fallback
-                        else -> Unit
-                    }
+        LazyColumn(
+            state = listState,
+            modifier = Modifier.fillMaxSize(),
+            contentPadding = androidx.compose.foundation.layout.PaddingValues(12.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            items(ui.items, key = { it.key }) { item ->
+                when (item) {
+                    is ChatItem.UserText -> UserBubble(item)
+                    is ChatItem.AssistantText -> AssistantBubble(item)
+                    is ChatItem.ToolCard -> ToolCard(item)
+                    is ChatItem.BashOutput -> BashCard(item)
+                    is ChatItem.SystemNote -> Text(
+                        item.text,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.alpha(0.8f),
+                    )
+                    // RemoveLive is consumed only in the VM and never enters the list; ignore as a fallback
+                    else -> Unit
                 }
-                if (hasQueue) {
-                    item(key = "queue") {
-                        QueueBanner(ui, onClear = onClearQueue)
-                    }
+            }
+            if (hasQueue) {
+                item(key = "queue") {
+                    QueueBanner(ui, onClear = onClearQueue)
                 }
             }
         }
@@ -586,9 +588,28 @@ private fun ChatItem.textLength(): Int = when (this) {
     else -> 0
 }
 
+@Composable
+private fun CopyItemButton(text: String, contentColor: Color = MaterialTheme.colorScheme.onSurfaceVariant) {
+    val clipboard = LocalClipboardManager.current
+    DisableSelection {
+        IconButton(
+            onClick = { clipboard.setText(AnnotatedString(text)) },
+            modifier = Modifier.size(28.dp),
+        ) {
+            Icon(
+                Icons.Filled.ContentCopy,
+                contentDescription = "Copy message",
+                modifier = Modifier.size(14.dp),
+                tint = contentColor,
+            )
+        }
+    }
+}
+
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
 private fun UserBubble(item: ChatItem.UserText) {
+    val copy = item.copyText()
     Column(horizontalAlignment = Alignment.End, modifier = Modifier.fillMaxWidth()) {
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
             Surface(
@@ -596,27 +617,35 @@ private fun UserBubble(item: ChatItem.UserText) {
                 contentColor = MaterialTheme.colorScheme.onPrimary,
                 shape = RoundedCornerShape(16.dp, 4.dp, 16.dp, 16.dp),
             ) {
-                Column(Modifier.padding(12.dp)) {
-                    if (item.imageCount > 0) {
-                        Text(
-                            "🖼 × ${item.imageCount}",
-                            style = MaterialTheme.typography.labelLarge,
-                        )
-                        if (item.text.isNotBlank()) Spacer(Modifier.size(4.dp))
-                    }
-                    if (item.text.isNotBlank()) {
-                        Text(item.text, style = MaterialTheme.typography.bodyMedium)
+                SelectionContainer {
+                    Column(Modifier.padding(12.dp)) {
+                        if (item.imageCount > 0) {
+                            Text(
+                                "🖼 × ${item.imageCount}",
+                                style = MaterialTheme.typography.labelLarge,
+                            )
+                            if (item.text.isNotBlank()) Spacer(Modifier.size(4.dp))
+                        }
+                        if (item.text.isNotBlank()) {
+                            Text(item.text, style = MaterialTheme.typography.bodyMedium)
+                        }
                     }
                 }
             }
         }
-        if (item.timeMs > 0) {
-            Text(
-                dev.pipilot.app.chat.formatShanghai(item.timeMs),
-                style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier.padding(end = 4.dp, top = 2.dp),
-            )
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(2.dp),
+            modifier = Modifier.padding(end = 4.dp, top = 2.dp),
+        ) {
+            if (item.timeMs > 0) {
+                Text(
+                    dev.pipilot.app.chat.formatShanghai(item.timeMs),
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            if (copy != null) CopyItemButton(copy)
         }
     }
 }
@@ -624,42 +653,55 @@ private fun UserBubble(item: ChatItem.UserText) {
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun AssistantBubble(item: ChatItem.AssistantText) {
+    val copy = item.copyText()
     Column(modifier = Modifier.fillMaxWidth()) {
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.Start) {
             Surface(
                 color = MaterialTheme.colorScheme.surfaceVariant,
                 shape = RoundedCornerShape(4.dp, 16.dp, 16.dp, 16.dp),
             ) {
-                Column(Modifier.padding(12.dp).widthIn(max = 320.dp).animateContentSize()) {
-                    if (!item.thinking.isNullOrBlank()) {
-                        Text(
-                            "Thinking…",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                        Text(
-                            item.thinking.take(600),
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            maxLines = 6,
-                        )
-                        Spacer(Modifier.size(6.dp))
-                    }
-                    MarkdownText(item.text)
-                    if (item.streaming) {
-                        BlinkingCursor()
+                val body = @Composable {
+                    Column(Modifier.padding(12.dp).widthIn(max = 320.dp).animateContentSize()) {
+                        if (!item.thinking.isNullOrBlank()) {
+                            Text(
+                                "Thinking…",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                            Text(
+                                item.thinking.take(600),
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                maxLines = 6,
+                            )
+                            Spacer(Modifier.size(6.dp))
+                        }
+                        MarkdownText(item.text)
+                        if (item.streaming) {
+                            BlinkingCursor()
+                        }
                     }
                 }
+                // Live tokens rebuild the bubble every chunk; keep selection off so a highlight cannot fight the stream.
+                if (item.streaming) body() else SelectionContainer { body() }
             }
         }
         // Hide time on the live streaming bubble (it would change every frame; show after final)
-        if (!item.streaming && item.timeMs > 0) {
-            Text(
-                dev.pipilot.app.chat.formatShanghai(item.timeMs),
-                style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
+        if (!item.streaming) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(2.dp),
                 modifier = Modifier.padding(start = 4.dp, top = 2.dp),
-            )
+            ) {
+                if (item.timeMs > 0) {
+                    Text(
+                        dev.pipilot.app.chat.formatShanghai(item.timeMs),
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                if (copy != null) CopyItemButton(copy)
+            }
         }
     }
 }
@@ -676,6 +718,7 @@ private fun BlinkingCursor() {
 
 @Composable
 private fun ToolCard(item: ChatItem.ToolCard) {
+    val copy = item.copyText()
     Surface(
         color = if (item.isError) MaterialTheme.colorScheme.errorContainer else MaterialTheme.colorScheme.surfaceVariant,
         shape = RoundedCornerShape(12.dp),
@@ -692,6 +735,7 @@ private fun ToolCard(item: ChatItem.ToolCard) {
                     item.toolName,
                     style = MaterialTheme.typography.labelLarge,
                     fontFamily = FontFamily.Monospace,
+                    modifier = Modifier.weight(1f),
                 )
                 if (item.running) {
                     Spacer(Modifier.size(8.dp))
@@ -704,26 +748,31 @@ private fun ToolCard(item: ChatItem.ToolCard) {
                         tint = if (item.isError) MaterialTheme.colorScheme.error else Color(0xFF43A047),
                     )
                 }
+                if (copy != null) CopyItemButton(copy)
             }
-            item.argsSummary?.let {
-                Text(
-                    it,
-                    style = MaterialTheme.typography.bodySmall,
-                    fontFamily = FontFamily.Monospace,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    maxLines = 2,
-                )
-            }
-            item.output?.let { out ->
-                Spacer(Modifier.size(6.dp))
-                Text(
-                    out.takeLast(2000),
-                    style = MaterialTheme.typography.bodySmall,
-                    fontFamily = FontFamily.Monospace,
-                    fontSize = 11.sp,
-                    maxLines = 10,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
+            SelectionContainer {
+                Column {
+                    item.argsSummary?.let {
+                        Text(
+                            it,
+                            style = MaterialTheme.typography.bodySmall,
+                            fontFamily = FontFamily.Monospace,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 2,
+                        )
+                    }
+                    item.output?.let { out ->
+                        Spacer(Modifier.size(6.dp))
+                        Text(
+                            out.takeLast(2000),
+                            style = MaterialTheme.typography.bodySmall,
+                            fontFamily = FontFamily.Monospace,
+                            fontSize = 11.sp,
+                            maxLines = 10,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                }
             }
         }
     }
@@ -731,20 +780,34 @@ private fun ToolCard(item: ChatItem.ToolCard) {
 
 @Composable
 private fun BashCard(item: ChatItem.BashOutput) {
+    val copy = item.copyText()
     Surface(color = Color(0xFF1E1E1E), shape = RoundedCornerShape(12.dp)) {
         Column(Modifier.padding(10.dp).fillMaxWidth()) {
-            item.command?.let {
-                Text("$ ${it.takeLast(120)}", style = MaterialTheme.typography.labelSmall, fontFamily = FontFamily.Monospace, color = Color(0xFF9CCC65))
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                item.command?.let {
+                    Text(
+                        "$ ${it.takeLast(120)}",
+                        style = MaterialTheme.typography.labelSmall,
+                        fontFamily = FontFamily.Monospace,
+                        color = Color(0xFF9CCC65),
+                        modifier = Modifier.weight(1f),
+                    )
+                } ?: Spacer(Modifier.weight(1f))
+                if (copy != null) CopyItemButton(copy, contentColor = Color(0xFFBDBDBD))
             }
-            Text(
-                item.output.takeLast(3000),
-                style = MaterialTheme.typography.bodySmall,
-                fontFamily = FontFamily.Monospace,
-                fontSize = 11.sp,
-                color = Color(0xFFD4D4D4),
-                maxLines = 14,
-            )
-            if (item.running) Text("…", color = Color(0xFFD4D4D4), fontFamily = FontFamily.Monospace)
+            SelectionContainer {
+                Column {
+                    Text(
+                        item.output.takeLast(3000),
+                        style = MaterialTheme.typography.bodySmall,
+                        fontFamily = FontFamily.Monospace,
+                        fontSize = 11.sp,
+                        color = Color(0xFFD4D4D4),
+                        maxLines = 14,
+                    )
+                    if (item.running) Text("…", color = Color(0xFFD4D4D4), fontFamily = FontFamily.Monospace)
+                }
+            }
         }
     }
 }
