@@ -25,6 +25,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
@@ -84,6 +85,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
@@ -440,21 +442,47 @@ private fun QueueBanner(ui: UiState, onClear: () -> Unit) {
 @Composable
 private fun ChatList(ui: UiState, onClearQueue: () -> Unit, modifier: Modifier = Modifier) {
     val listState = rememberLazyListState()
-    // Stick to bottom on count or last-item content changes; do not interrupt when the user scrolled up
     val lastItemLen = ui.items.lastOrNull()?.let { it.textLength() } ?: 0
     val lastKey = ui.items.lastOrNull()?.key
-    val followBottom = remember(ui.items.size) { mutableStateOf(true) }
-    LaunchedEffect(ui.items.size) {
-        if (ui.items.isNotEmpty() && followBottom.value) listState.animateScrollToItem(ui.items.size - 1)
+    val hasQueue = ui.queueSteering.isNotEmpty() || ui.queueFollowUp.isNotEmpty()
+    val lastListIndex = ui.items.size + (if (hasQueue) 1 else 0) - 1
+    val followBottom = remember { mutableStateOf(true) }
+    val pinningBottom = remember { mutableStateOf(false) }
+    val jumpScope = rememberCoroutineScope()
+    suspend fun pinToBottom(animate: Boolean = false) {
+        pinningBottom.value = true
+        try {
+            listState.scrollToLastItemBottom(animate)
+        } finally {
+            pinningBottom.value = false
+        }
     }
-    LaunchedEffect(lastKey, lastItemLen) {
-        if (ui.items.isNotEmpty() && followBottom.value) listState.scrollToItem(ui.items.size - 1)
+    // Pin the end of a growing last item, not its start. Ignore content-driven
+    // jumps while the user is dragging so a swipe is not cancelled mid-gesture.
+    LaunchedEffect(ui.items.size, lastKey, lastItemLen, hasQueue, followBottom.value) {
+        if (!followBottom.value || lastListIndex < 0) return@LaunchedEffect
+        snapshotFlow {
+            val last = listState.layoutInfo.visibleItemsInfo.lastOrNull()
+            Triple(last?.index, last?.size, listState.layoutInfo.viewportEndOffset)
+        }.collect {
+            if (!followBottom.value || listState.isScrollInProgress || pinningBottom.value) return@collect
+            if (!listState.isAtChatBottom(lastListIndex)) {
+                pinToBottom()
+            }
+        }
     }
-    // Stop following when the user scrolls up (>2 items from bottom); resume near the bottom
-    LaunchedEffect(listState.isScrollInProgress) {
-        if (!listState.isScrollInProgress) {
-            val atBottom = listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index?.let { it >= ui.items.size - 2 } ?: true
-            followBottom.value = atBottom
+    LaunchedEffect(listState, lastListIndex) {
+        snapshotFlow {
+            val last = listState.layoutInfo.visibleItemsInfo.lastOrNull()
+            Triple(listState.isScrollInProgress, last?.offset, last?.size)
+        }.collect { (inProgress, _, _) ->
+            if (pinningBottom.value || listState.layoutInfo.visibleItemsInfo.isEmpty()) return@collect
+            val atBottom = listState.isAtChatBottom(lastListIndex)
+            if (inProgress) {
+                if (!atBottom) followBottom.value = false
+            } else {
+                followBottom.value = atBottom
+            }
         }
     }
     Box(modifier) {
@@ -481,20 +509,19 @@ private fun ChatList(ui: UiState, onClearQueue: () -> Unit, modifier: Modifier =
                         else -> Unit
                     }
                 }
-                if (ui.queueSteering.isNotEmpty() || ui.queueFollowUp.isNotEmpty()) {
+                if (hasQueue) {
                     item(key = "queue") {
                         QueueBanner(ui, onClear = onClearQueue)
                     }
                 }
             }
         }
-        // Shown after scrolling up; tap to jump to the latest message
+        // Shown after scrolling up; tap to jump to the latest output
         if (!followBottom.value) {
-            val scope = androidx.compose.runtime.rememberCoroutineScope()
             IconButton(
                 onClick = {
                     followBottom.value = true
-                    if (ui.items.isNotEmpty()) scope.launch { listState.animateScrollToItem(ui.items.size - 1) }
+                    jumpScope.launch { pinToBottom(animate = true) }
                 },
                 modifier = Modifier
                     .align(Alignment.BottomEnd)
@@ -506,6 +533,47 @@ private fun ChatList(ui: UiState, onClearQueue: () -> Unit, modifier: Modifier =
             }
         }
     }
+}
+
+private fun LazyListState.isAtChatBottom(lastIndex: Int): Boolean {
+    val info = layoutInfo
+    return ChatScroll.isAtBottom(
+        itemCount = info.totalItemsCount,
+        viewportEndOffset = info.viewportEndOffset,
+        visible = info.visibleItemsInfo.map {
+            ChatVisibleItem(index = it.index, offset = it.offset, size = it.size)
+        },
+        lastIndex = lastIndex,
+        afterContentPadding = info.afterContentPadding,
+    )
+}
+
+private suspend fun LazyListState.scrollToLastItemBottom(animate: Boolean = false) {
+    val lastIndex = layoutInfo.totalItemsCount - 1
+    if (lastIndex < 0) return
+    suspend fun jump(offset: Int) {
+        if (animate) animateScrollToItem(lastIndex, offset) else scrollToItem(lastIndex, offset)
+    }
+    val info = layoutInfo
+    val last = info.visibleItemsInfo.lastOrNull { it.index == lastIndex }
+    val offset = if (last != null) {
+        ChatScroll.lastItemBottomOffset(
+            itemSize = last.size,
+            viewportSize = info.viewportEndOffset - info.viewportStartOffset,
+            afterContentPadding = info.afterContentPadding,
+        )
+    } else {
+        Int.MAX_VALUE / 4
+    }
+    jump(offset)
+    val settled = layoutInfo
+    val settledLast = settled.visibleItemsInfo.lastOrNull { it.index == lastIndex } ?: return
+    val settledOffset = ChatScroll.lastItemBottomOffset(
+        itemSize = settledLast.size,
+        viewportSize = settled.viewportEndOffset - settled.viewportStartOffset,
+        afterContentPadding = settled.afterContentPadding,
+    )
+    if (settledOffset != offset) jump(settledOffset)
 }
 
 /** Estimate item content length to detect "last item is still growing" while streaming. */

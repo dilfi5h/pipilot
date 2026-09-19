@@ -52,6 +52,10 @@ pipe and lines up naturally with RPC's stdio interface:
 - JSONL streaming, SSH (sshj), and coroutine Flow are mature on the JVM; no
   platform-channel bridge cost like Flutter/RN.
 - Chat UI is a Compose comfort zone: LazyColumn + streaming text + local updates.
+  Follow-bottom uses remaining pixels under the last item, not
+  `scrollToItem(lastIndex)` at offset 0, so a tall live bubble does not snap
+  its start to the top of the viewport on every token. User drags pause
+  follow; the jump-to-bottom FAB resumes it.
 - Small package (minSdk 26, no WebView/JS engine).
 
 ### 2.3 Layers
