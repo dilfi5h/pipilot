@@ -55,7 +55,10 @@ pipe and lines up naturally with RPC's stdio interface:
   Follow-bottom uses remaining pixels under the last item, not
   `scrollToItem(lastIndex)` at offset 0, so a tall live bubble does not snap
   its start to the top of the viewport on every token. User drags pause
-  follow; the jump-to-bottom FAB resumes it.
+  follow; the jump-to-bottom FAB resumes it. A full history rebuild
+  (reconnect after a long background, session switch) re-pins to the
+  latest output; a short resume that did not rebuild history leaves the
+  scroll place alone.
   Copy is split from system selection: each finished bubble has its own
   `SelectionContainer` for highlights; a Copy icon lives in `DisableSelection`
   chrome (timestamp row / code-block header) so a tap never starts a selection.

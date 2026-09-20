@@ -8,6 +8,10 @@ package dev.pipilot.app.ui
  * taller than the screen, that looks like "swipe down jumps back to the top of
  * the current turn." Follow must use remaining pixels under the last item, not
  * "last visible index is near the end."
+ *
+ * After a full history rebuild (reconnect / session switch), the list is empty
+ * then long. Idle layout at the start of that list must not disable follow;
+ * only a user drag away from the bottom does.
  */
 internal data class ChatVisibleItem(
     val index: Int,
@@ -39,4 +43,18 @@ internal object ChatScroll {
         afterContentPadding: Int = 0,
         minOffset: Int = 0,
     ): Int = (itemSize + afterContentPadding - viewportSize).coerceAtLeast(minOffset)
+
+    /**
+     * Idle layout after a full rebuild starts at index 0, which is not the
+     * bottom. Keep following until the user actually drags away.
+     */
+    fun followAfterIdleLayout(
+        currentlyFollowing: Boolean,
+        userDragging: Boolean,
+        atBottom: Boolean,
+    ): Boolean {
+        if (userDragging) return atBottom
+        if (currentlyFollowing) return true
+        return atBottom
+    }
 }

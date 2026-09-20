@@ -82,6 +82,50 @@ class ChatScrollTest {
     }
 
     @Test
+    fun idleLayoutDoesNotDisableFollow() {
+        assertTrue(
+            ChatScroll.followAfterIdleLayout(
+                currentlyFollowing = true,
+                userDragging = false,
+                atBottom = false,
+            ),
+        )
+    }
+
+    @Test
+    fun userDragAwayFromBottomDisablesFollow() {
+        assertFalse(
+            ChatScroll.followAfterIdleLayout(
+                currentlyFollowing = true,
+                userDragging = true,
+                atBottom = false,
+            ),
+        )
+    }
+
+    @Test
+    fun settlingAtBottomResumesFollow() {
+        assertTrue(
+            ChatScroll.followAfterIdleLayout(
+                currentlyFollowing = false,
+                userDragging = false,
+                atBottom = true,
+            ),
+        )
+    }
+
+    @Test
+    fun idleWhileNotFollowingStaysPut() {
+        assertFalse(
+            ChatScroll.followAfterIdleLayout(
+                currentlyFollowing = false,
+                userDragging = false,
+                atBottom = false,
+            ),
+        )
+    }
+
+    @Test
     fun contentPaddingIsCountedWhenCheckingBottom() {
         assertTrue(
             ChatScroll.isAtBottom(

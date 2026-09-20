@@ -123,7 +123,9 @@ import dev.pipilot.app.keepalive.ConnectionKeepAliveService
 import dev.pipilot.app.log.AppLog
 import dev.pipilot.app.rpc.PiModel
 import dev.pipilot.app.settings.ConnectionSettings
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
@@ -468,10 +470,23 @@ private fun ChatList(ui: UiState, onClearQueue: () -> Unit, modifier: Modifier =
     suspend fun pinToBottom(animate: Boolean = false) {
         pinningBottom.value = true
         try {
+            if (listState.layoutInfo.totalItemsCount <= 0) {
+                withTimeoutOrNull(1_000) {
+                    snapshotFlow { listState.layoutInfo.totalItemsCount }.first { it > 0 }
+                }
+            }
             listState.scrollToLastItemBottom(animate)
         } finally {
             pinningBottom.value = false
         }
+    }
+    // Full history rebuild (reconnect / session switch) lands at index 0.
+    // Re-enable follow and pin to the latest output; a short background
+    // resume that did not rebuild history leaves the user's place alone.
+    LaunchedEffect(ui.historyEpoch) {
+        if (ui.historyEpoch == 0L || lastListIndex < 0) return@LaunchedEffect
+        followBottom.value = true
+        pinToBottom()
     }
     // Pin the end of a growing last item, not its start. Ignore content-driven
     // jumps while the user is dragging so a swipe is not cancelled mid-gesture.
@@ -494,11 +509,11 @@ private fun ChatList(ui: UiState, onClearQueue: () -> Unit, modifier: Modifier =
         }.collect { (inProgress, _, _) ->
             if (pinningBottom.value || listState.layoutInfo.visibleItemsInfo.isEmpty()) return@collect
             val atBottom = listState.isAtChatBottom(lastListIndex)
-            if (inProgress) {
-                if (!atBottom) followBottom.value = false
-            } else {
-                followBottom.value = atBottom
-            }
+            followBottom.value = ChatScroll.followAfterIdleLayout(
+                currentlyFollowing = followBottom.value,
+                userDragging = inProgress,
+                atBottom = atBottom,
+            )
         }
     }
     Box(modifier) {
