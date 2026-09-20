@@ -9,12 +9,16 @@ import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -23,7 +27,6 @@ import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.LazyRow
@@ -38,11 +41,12 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.Add
-import androidx.compose.material.icons.filled.Build
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Image
+import androidx.compose.material.icons.filled.ExpandLess
+import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.List
 import androidx.compose.material.icons.filled.Memory
@@ -90,23 +94,31 @@ import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.PathEffect
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
+import dev.pipilot.app.chat.ChatCollapse
 import dev.pipilot.app.chat.ChatItem
 import dev.pipilot.app.chat.MarkdownText
+import dev.pipilot.app.chat.ToolFamily
 import dev.pipilot.app.chat.copyText
+import dev.pipilot.app.ui.theme.ChatPalette
 import dev.pipilot.app.keepalive.ConnectionKeepAliveService
 import dev.pipilot.app.log.AppLog
 import dev.pipilot.app.rpc.PiModel
@@ -654,54 +666,135 @@ private fun UserBubble(item: ChatItem.UserText) {
 @Composable
 private fun AssistantBubble(item: ChatItem.AssistantText) {
     val copy = item.copyText()
-    Column(modifier = Modifier.fillMaxWidth()) {
-        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.Start) {
-            Surface(
-                color = MaterialTheme.colorScheme.surfaceVariant,
-                shape = RoundedCornerShape(4.dp, 16.dp, 16.dp, 16.dp),
-            ) {
-                val body = @Composable {
-                    Column(Modifier.padding(12.dp).widthIn(max = 320.dp).animateContentSize()) {
-                        if (!item.thinking.isNullOrBlank()) {
+    val hasText = item.text.isNotBlank() || item.streaming
+    Column(modifier = Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        if (!item.thinking.isNullOrBlank()) {
+            ThinkingCard(thinking = item.thinking, streaming = item.streaming)
+        }
+        if (hasText) {
+            Column {
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.Start) {
+                    Surface(
+                        color = MaterialTheme.colorScheme.surfaceVariant,
+                        shape = RoundedCornerShape(4.dp, 16.dp, 16.dp, 16.dp),
+                    ) {
+                        val body = @Composable {
+                            Column(Modifier.padding(12.dp).animateContentSize()) {
+                                MarkdownText(item.text)
+                                if (item.streaming) BlinkingCursor()
+                            }
+                        }
+                        if (item.streaming) body() else SelectionContainer { body() }
+                    }
+                }
+                if (!item.streaming) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(2.dp),
+                        modifier = Modifier.padding(start = 4.dp, top = 2.dp),
+                    ) {
+                        if (item.timeMs > 0) {
                             Text(
-                                "Thinking…",
+                                dev.pipilot.app.chat.formatShanghai(item.timeMs),
                                 style = MaterialTheme.typography.labelSmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                             )
-                            Text(
-                                item.thinking.take(600),
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                maxLines = 6,
-                            )
-                            Spacer(Modifier.size(6.dp))
                         }
-                        MarkdownText(item.text)
-                        if (item.streaming) {
-                            BlinkingCursor()
-                        }
+                        if (copy != null) CopyItemButton(copy)
                     }
                 }
-                // Live tokens rebuild the bubble every chunk; keep selection off so a highlight cannot fight the stream.
-                if (item.streaming) body() else SelectionContainer { body() }
             }
         }
-        // Hide time on the live streaming bubble (it would change every frame; show after final)
-        if (!item.streaming) {
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(2.dp),
-                modifier = Modifier.padding(start = 4.dp, top = 2.dp),
-            ) {
-                if (item.timeMs > 0) {
-                    Text(
-                        dev.pipilot.app.chat.formatShanghai(item.timeMs),
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
-                if (copy != null) CopyItemButton(copy)
+    }
+}
+
+@Composable
+private fun ThinkingCard(thinking: String, streaming: Boolean) {
+    var userExpanded by remember { mutableStateOf<Boolean?>(null) }
+    val expanded = ChatCollapse.isExpanded(active = streaming, userExpanded = userExpanded)
+    val outline = MaterialTheme.colorScheme.outlineVariant
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .drawBehind {
+                val stroke = Stroke(width = 1.dp.toPx(), pathEffect = PathEffect.dashPathEffect(floatArrayOf(8f, 6f)))
+                drawRoundRect(
+                    color = outline,
+                    style = stroke,
+                    cornerRadius = CornerRadius(12.dp.toPx()),
+                )
             }
+            .padding(10.dp)
+            .animateContentSize(),
+    ) {
+        CollapseHeader(
+            title = if (streaming) "Thinking…" else "Thinking",
+            expanded = expanded,
+            onToggle = { userExpanded = !expanded },
+        )
+        if (expanded) {
+            Text(
+                ChatCollapse.expandedBody(thinking, fromEnd = false),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        } else {
+            val preview = ChatCollapse.thinkingPreview(thinking)
+            if (preview.isNotEmpty()) {
+                Text(
+                    preview,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun CollapseHeader(
+    title: String,
+    expanded: Boolean,
+    onToggle: () -> Unit,
+    modifier: Modifier = Modifier,
+    titleColor: Color = MaterialTheme.colorScheme.onSurfaceVariant,
+    titleStyle: androidx.compose.ui.text.TextStyle = MaterialTheme.typography.labelSmall,
+    titleFontFamily: FontFamily? = null,
+    chevronTint: Color = MaterialTheme.colorScheme.onSurfaceVariant,
+    leading: @Composable () -> Unit = {},
+    trailing: @Composable () -> Unit = {},
+) {
+    DisableSelection {
+        Row(
+            modifier = modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Row(
+                modifier = Modifier
+                    .weight(1f)
+                    .clickable(onClick = onToggle),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                leading()
+                Text(
+                    title,
+                    style = titleStyle,
+                    fontFamily = titleFontFamily,
+                    color = titleColor,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f),
+                )
+                Icon(
+                    if (expanded) Icons.Filled.ExpandLess else Icons.Filled.ExpandMore,
+                    contentDescription = if (expanded) "Collapse" else "Expand",
+                    modifier = Modifier.size(16.dp),
+                    tint = chevronTint,
+                )
+            }
+            trailing()
         }
     }
 }
@@ -718,58 +811,91 @@ private fun BlinkingCursor() {
 
 @Composable
 private fun ToolCard(item: ChatItem.ToolCard) {
+    val family = ChatCollapse.toolFamily(item.toolName)
+    if (family == ToolFamily.Bash) {
+        BashLikeCard(
+            key = item.key,
+            command = item.argsSummary,
+            output = item.output.orEmpty(),
+            running = item.running,
+            isError = item.isError,
+            copy = item.copyText(),
+        )
+        return
+    }
     val copy = item.copyText()
-    Surface(
-        color = if (item.isError) MaterialTheme.colorScheme.errorContainer else MaterialTheme.colorScheme.surfaceVariant,
-        shape = RoundedCornerShape(12.dp),
-    ) {
-        Column(Modifier.padding(10.dp).fillMaxWidth()) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Icon(
-                    Icons.Filled.Build, null,
-                    Modifier.size(14.dp),
-                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+    var userExpanded by remember(item.key) { mutableStateOf<Boolean?>(null) }
+    val expanded = ChatCollapse.isExpanded(active = item.running, userExpanded = userExpanded)
+    val dark = isSystemInDarkTheme()
+    val chrome = ChatPalette.tool(family, dark)
+    val path = item.argsSummary?.takeIf { it.isNotBlank() }
+    val output = item.output?.takeIf { it.isNotEmpty() }
+    val renderMd = family == ToolFamily.Read && path != null && ChatCollapse.isMarkdownPath(path) && output != null
+    Surface(color = chrome.background, shape = RoundedCornerShape(12.dp)) {
+        Row(Modifier.height(IntrinsicSize.Min).fillMaxWidth()) {
+            Box(Modifier.width(3.dp).fillMaxHeight().background(chrome.accent, RoundedCornerShape(topStart = 12.dp, bottomStart = 12.dp)))
+            Column(Modifier.padding(10.dp).weight(1f).animateContentSize()) {
+                CollapseHeader(
+                    title = item.toolName,
+                    expanded = expanded,
+                    onToggle = { userExpanded = !expanded },
+                    titleStyle = MaterialTheme.typography.labelLarge,
+                    titleFontFamily = FontFamily.Monospace,
+                    titleColor = chrome.accent,
+                    chevronTint = chrome.accent,
+                    trailing = {
+                        if (item.running) {
+                            CircularProgressIndicator(Modifier.size(12.dp), strokeWidth = 2.dp, color = chrome.accent)
+                            Spacer(Modifier.size(6.dp))
+                        } else {
+                            Icon(
+                                if (item.isError) Icons.Filled.Close else Icons.Filled.Check,
+                                null, Modifier.size(14.dp),
+                                tint = if (item.isError) MaterialTheme.colorScheme.error else ChatPalette.ok,
+                            )
+                            Spacer(Modifier.size(4.dp))
+                        }
+                        if (copy != null) CopyItemButton(copy, contentColor = chrome.accent)
+                    },
                 )
-                Spacer(Modifier.size(6.dp))
-                Text(
-                    item.toolName,
-                    style = MaterialTheme.typography.labelLarge,
-                    fontFamily = FontFamily.Monospace,
-                    modifier = Modifier.weight(1f),
-                )
-                if (item.running) {
-                    Spacer(Modifier.size(8.dp))
-                    CircularProgressIndicator(Modifier.size(12.dp), strokeWidth = 2.dp)
-                } else {
-                    Spacer(Modifier.size(4.dp))
-                    Icon(
-                        if (item.isError) Icons.Filled.Close else Icons.Filled.Check,
-                        null, Modifier.size(14.dp),
-                        tint = if (item.isError) MaterialTheme.colorScheme.error else Color(0xFF43A047),
+                if (path != null) {
+                    Text(
+                        path,
+                        style = MaterialTheme.typography.bodySmall,
+                        fontFamily = FontFamily.Monospace,
+                        fontSize = 11.sp,
+                        color = chrome.accent,
                     )
                 }
-                if (copy != null) CopyItemButton(copy)
-            }
-            SelectionContainer {
-                Column {
-                    item.argsSummary?.let {
-                        Text(
-                            it,
-                            style = MaterialTheme.typography.bodySmall,
-                            fontFamily = FontFamily.Monospace,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            maxLines = 2,
-                        )
+                if (expanded) {
+                    SelectionContainer {
+                        if (renderMd) {
+                            MarkdownText(ChatCollapse.expandedBody(output!!, fromEnd = false))
+                        } else if (output != null) {
+                            Text(
+                                ChatCollapse.expandedBody(output, fromEnd = true),
+                                style = MaterialTheme.typography.bodySmall,
+                                fontFamily = FontFamily.Monospace,
+                                fontSize = 11.sp,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
                     }
-                    item.output?.let { out ->
-                        Spacer(Modifier.size(6.dp))
+                } else {
+                    val preview = when {
+                        output != null -> ChatCollapse.outputPreview(output)
+                        path != null -> ChatCollapse.thinkingPreview(path)
+                        else -> ""
+                    }
+                    if (preview.isNotEmpty()) {
                         Text(
-                            out.takeLast(2000),
+                            preview,
                             style = MaterialTheme.typography.bodySmall,
                             fontFamily = FontFamily.Monospace,
                             fontSize = 11.sp,
-                            maxLines = 10,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
                         )
                     }
                 }
@@ -780,32 +906,91 @@ private fun ToolCard(item: ChatItem.ToolCard) {
 
 @Composable
 private fun BashCard(item: ChatItem.BashOutput) {
-    val copy = item.copyText()
-    Surface(color = Color(0xFF1E1E1E), shape = RoundedCornerShape(12.dp)) {
-        Column(Modifier.padding(10.dp).fillMaxWidth()) {
-            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                item.command?.let {
-                    Text(
-                        "$ ${it.takeLast(120)}",
-                        style = MaterialTheme.typography.labelSmall,
-                        fontFamily = FontFamily.Monospace,
-                        color = Color(0xFF9CCC65),
-                        modifier = Modifier.weight(1f),
-                    )
-                } ?: Spacer(Modifier.weight(1f))
-                if (copy != null) CopyItemButton(copy, contentColor = Color(0xFFBDBDBD))
+    BashLikeCard(
+        key = item.key,
+        command = item.command,
+        output = item.output,
+        running = item.running,
+        isError = false,
+        copy = item.copyText(),
+    )
+}
+
+@Composable
+private fun BashLikeCard(
+    key: String,
+    command: String?,
+    output: String,
+    running: Boolean,
+    isError: Boolean,
+    copy: String?,
+) {
+    var userExpanded by remember(key) { mutableStateOf<Boolean?>(null) }
+    val expanded = ChatCollapse.isExpanded(active = running, userExpanded = userExpanded)
+    Surface(color = ChatPalette.bashBg, shape = RoundedCornerShape(12.dp)) {
+        Column(Modifier.padding(10.dp).fillMaxWidth().animateContentSize()) {
+            CollapseHeader(
+                title = "bash",
+                expanded = expanded,
+                onToggle = { userExpanded = !expanded },
+                titleColor = ChatPalette.bashCmd,
+                titleStyle = MaterialTheme.typography.labelLarge,
+                titleFontFamily = FontFamily.Monospace,
+                chevronTint = ChatPalette.bashMuted,
+                trailing = {
+                    if (running) {
+                        CircularProgressIndicator(Modifier.size(12.dp), strokeWidth = 2.dp, color = ChatPalette.bashCmd)
+                        Spacer(Modifier.size(6.dp))
+                    } else {
+                        Icon(
+                            if (isError) Icons.Filled.Close else Icons.Filled.Check,
+                            null, Modifier.size(14.dp),
+                            tint = if (isError) MaterialTheme.colorScheme.error else ChatPalette.ok,
+                        )
+                        Spacer(Modifier.size(4.dp))
+                    }
+                    if (copy != null) CopyItemButton(copy, contentColor = ChatPalette.bashMuted)
+                },
+            )
+            val cmd = command?.takeIf { it.isNotBlank() }
+            if (cmd != null) {
+                Text(
+                    if (cmd.startsWith("$ ")) cmd else "$ $cmd",
+                    style = MaterialTheme.typography.bodySmall,
+                    fontFamily = FontFamily.Monospace,
+                    fontSize = 11.sp,
+                    color = ChatPalette.bashCmd,
+                )
             }
-            SelectionContainer {
-                Column {
+            if (expanded) {
+                SelectionContainer {
+                    Column {
+                        if (output.isNotEmpty()) {
+                            Text(
+                                ChatCollapse.expandedBody(output, fromEnd = true),
+                                style = MaterialTheme.typography.bodySmall,
+                                fontFamily = FontFamily.Monospace,
+                                fontSize = 11.sp,
+                                color = ChatPalette.bashFg,
+                            )
+                        }
+                        if (running) Text("…", color = ChatPalette.bashFg, fontFamily = FontFamily.Monospace)
+                    }
+                }
+            } else {
+                val preview = ChatCollapse.outputPreview(output)
+                if (preview.isNotEmpty()) {
                     Text(
-                        item.output.takeLast(3000),
+                        preview,
                         style = MaterialTheme.typography.bodySmall,
                         fontFamily = FontFamily.Monospace,
                         fontSize = 11.sp,
-                        color = Color(0xFFD4D4D4),
-                        maxLines = 14,
+                        color = ChatPalette.bashFg,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
                     )
-                    if (item.running) Text("…", color = Color(0xFFD4D4D4), fontFamily = FontFamily.Monospace)
+                } else if (running) {
+                    Text("…", color = ChatPalette.bashFg, fontFamily = FontFamily.Monospace)
                 }
             }
         }

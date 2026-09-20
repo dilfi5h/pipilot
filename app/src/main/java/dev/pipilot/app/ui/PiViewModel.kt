@@ -7,6 +7,7 @@ import android.net.NetworkCapabilities
 import android.util.Log
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import dev.pipilot.app.chat.ChatCollapse
 import dev.pipilot.app.chat.ChatItem
 import dev.pipilot.app.chat.StreamReducer
 import dev.pipilot.app.keepalive.ConnectionKeepAliveService
@@ -88,6 +89,8 @@ data class UiState(
     val restoreDraft: String? = null,
     val dialog: UiDialog? = null,
     val statsText: String? = null,
+    /** Bumped after a full history rebuild so ChatList re-pins to the latest output. */
+    val historyEpoch: Long = 0,
 )
 
 class PiViewModel(app: Application) : AndroidViewModel(app) {
@@ -866,9 +869,20 @@ class PiViewModel(app: Application) : AndroidViewModel(app) {
                 "assistant" -> {
                     val text = msg.blocks.filter { it.type == "text" }.joinToString("") { it.text ?: "" }
                     val thinking = msg.blocks.filter { it.type == "thinking" }.joinToString("") { it.text ?: "" }
-                    if (text.isNotEmpty()) items.add(ChatItem.AssistantText(text, thinking.ifEmpty { null }, false, key = "hist-a-${entry.str("id") ?: items.size}", timeMs = msg.timestamp ?: 0))
+                    if (text.isNotEmpty() || thinking.isNotEmpty()) {
+                        items.add(ChatItem.AssistantText(text, thinking.ifEmpty { null }, false, key = "hist-a-${entry.str("id") ?: items.size}", timeMs = msg.timestamp ?: 0))
+                    }
                     for (tc in msg.blocks.filter { it.type == "toolCall" }) {
-                        items.add(ChatItem.ToolCard(tc.toolCallId ?: "call-${items.size}", tc.toolName ?: "?", tc.argumentsJson, null, running = false, isError = false))
+                        items.add(
+                            ChatItem.ToolCard(
+                                tc.toolCallId ?: "call-${items.size}",
+                                tc.toolName ?: "?",
+                                ChatCollapse.summarizeArgs(tc.argumentsJson),
+                                null,
+                                running = false,
+                                isError = false,
+                            ),
+                        )
                     }
                 }
                 "toolResult" -> {
@@ -889,7 +903,11 @@ class PiViewModel(app: Application) : AndroidViewModel(app) {
         }
         val old = _ui.value.items
         val base = if (since == null) old.filterIsInstance<ChatItem.SystemNote>() else old
-        _ui.value = _ui.value.copy(items = if (since == null) base + items else mergeItems(base, items))
+        val nextItems = if (since == null) base + items else mergeItems(base, items)
+        _ui.value = _ui.value.copy(
+            items = nextItems,
+            historyEpoch = if (since == null) _ui.value.historyEpoch + 1 else _ui.value.historyEpoch,
+        )
     }
 
     fun setModel(model: PiModel) {

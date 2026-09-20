@@ -39,6 +39,30 @@ gradle assembleRelease   # or ./gradlew if the repo has a wrapper
 
 - **[Design notes](docs/DESIGN.md)** — architecture decisions, protocol implementation notes (JSONL framing, streaming assembly, request/response correlation), SSH layer, security, and roadmap
 - **[RPC protocol reference](docs/rpc.md)** — full upstream pi RPC-mode docs (commands / events / extension UI sub-protocol)
+- **[Chat UI preview](tools/chat-preview/README.md)** — HTML mock of real pi sessions; settle layout here before Compose
+
+## Chat UI preview (HTML before Android)
+
+For **pure UI** work (bubbles, collapse, markdown, spacing, density) do **not** start in Compose. Pull real pi session files, iterate in a browser, then port the settled layout to Android. That avoids a release APK for every visual tweak.
+
+1. Copy session jsonl from the machine that runs pi. Files live under `~/.pi/agent/sessions/` in cwd-named subfolders (e.g. `--root--`):
+
+   ```bash
+   mkdir -p tools/chat-preview/sessions
+   scp 'host:~/.pi/agent/sessions/*/*.jsonl' tools/chat-preview/sessions/
+   ```
+
+2. Turn dumps into chat fixtures (same item shapes the app renders: user / assistant / tool / bash):
+
+   ```bash
+   python3 tools/chat-preview/parse_sessions.py
+   ```
+
+3. Open [`tools/chat-preview/index.html`](tools/chat-preview/index.html) in a browser. Switch sessions, expand/collapse thinking · tool · bash, then change CSS/markup until it looks right.
+
+4. Only after that, implement the same behavior in Compose (`PiScreen` / `MarkdownText` / `ChatCollapse`).
+
+Session dumps and generated `fixtures.js` are gitignored. Commands and current mock defaults: [`tools/chat-preview/README.md`](tools/chat-preview/README.md).
 
 ## Features (MVP)
 

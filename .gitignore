@@ -27,3 +27,7 @@ vendor/
 # Signing credentials (local only, never commit)
 pipilot-release.keystore
 keystore.properties
+
+# Local pi session dumps / generated fixtures for the HTML chat mock
+tools/chat-preview/sessions/
+tools/chat-preview/fixtures.js

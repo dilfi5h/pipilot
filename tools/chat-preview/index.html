@@ -1,0 +1,597 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>PiPilot chat mock</title>
+  <style>
+    :root {
+      --cyan: #0E7490;
+      --cyan-bright: #22D3EE;
+      --on-primary: #ffffff;
+      --secondary: #546E7A;
+      --surface: #FAFAFA;
+      --surface-variant: #E4EAED;
+      --on-surface: #1C1B1F;
+      --on-variant: #5C6569;
+      --outline: #C4CDD0;
+      --error: #B3261E;
+      --error-container: #F9DEDC;
+      --ok: #43A047;
+      --bash-bg: #1E1E1E;
+      --bash-cmd: #9CCC65;
+      --bash-fg: #D4D4D4;
+      --read-bg: #E8F1F4;
+      --read-accent: #0E7490;
+      --write-bg: #F3EDE4;
+      --write-accent: #B45309;
+      --edit-bg: #EEE8F4;
+      --edit-accent: #6D28D9;
+      --tool-bg: #ECEFF1;
+      --tool-accent: #546E7A;
+      --code-bg: #1E1E1E;
+      --phone-w: 390px;
+      --phone-h: 780px;
+    }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; height: 100%; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      background: #1a2226;
+      color: #e8eef0;
+      display: flex;
+      min-height: 100%;
+    }
+    .side {
+      width: min(420px, 38vw);
+      padding: 20px 22px;
+      overflow: auto;
+      border-right: 1px solid #2c383d;
+    }
+    .side h1 { font-size: 18px; margin: 0 0 6px; font-weight: 650; }
+    .side p { color: #9aa7ad; font-size: 13px; line-height: 1.5; margin: 0 0 14px; }
+    .session-list { display: flex; flex-direction: column; gap: 8px; margin-bottom: 18px; }
+    .session-btn {
+      text-align: left;
+      background: #243034;
+      color: #e8eef0;
+      border: 1px solid #354348;
+      border-radius: 10px;
+      padding: 10px 12px;
+      cursor: pointer;
+    }
+    .session-btn.active { border-color: var(--cyan-bright); background: #1e3a40; }
+    .session-btn b { display: block; font-size: 14px; }
+    .session-btn span { color: #8b999f; font-size: 12px; }
+    .toggles { display: flex; flex-direction: column; gap: 8px; font-size: 13px; color: #c5d0d4; }
+    .toggles label { display: flex; gap: 8px; align-items: center; }
+    .notes { margin-top: 18px; font-size: 13px; color: #b7c3c8; line-height: 1.55; }
+    .notes code { font-size: 12px; background: #243034; padding: 1px 5px; border-radius: 4px; }
+    .stage {
+      flex: 1;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 24px;
+    }
+    .phone {
+      width: var(--phone-w);
+      height: var(--phone-h);
+      background: var(--surface);
+      color: var(--on-surface);
+      border-radius: 28px;
+      box-shadow: 0 18px 60px rgba(0,0,0,.45);
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+      border: 8px solid #111;
+    }
+    .status-bar {
+      height: 28px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0 16px;
+      font-size: 11px;
+      color: #444;
+    }
+    .topbar {
+      height: 52px;
+      display: flex;
+      align-items: center;
+      padding: 0 12px;
+      gap: 8px;
+      border-bottom: 1px solid #eceff1;
+      background: #fff;
+    }
+    .topbar .title { font-weight: 650; font-size: 16px; flex: 1; }
+    .topbar .sub { font-size: 11px; color: var(--on-variant); font-weight: 400; }
+    .list {
+      flex: 1;
+      overflow: auto;
+      padding: 12px;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      background: var(--surface);
+    }
+    .composer {
+      border-top: 1px solid #eceff1;
+      background: #fff;
+      padding: 8px 10px 12px;
+    }
+    .status-strip { font-size: 11px; color: var(--on-variant); padding: 0 6px 6px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .composer-row { display: flex; gap: 6px; align-items: flex-end; }
+    .fake-input {
+      flex: 1;
+      border: 1px solid #cfd8dc;
+      border-radius: 8px;
+      min-height: 40px;
+      padding: 10px 12px;
+      color: #90a4ae;
+      font-size: 14px;
+    }
+    .send {
+      width: 40px; height: 40px; border-radius: 20px;
+      background: var(--cyan); color: #fff; display: grid; place-items: center; font-size: 16px;
+    }
+    .row-user { display: flex; justify-content: flex-end; }
+    .row-assistant { display: flex; justify-content: flex-start; }
+    .bubble {
+      max-width: 100%;
+      padding: 12px;
+      font-size: 14px;
+      line-height: 1.45;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+    .bubble-user {
+      background: var(--cyan);
+      color: var(--on-primary);
+      border-radius: 16px 4px 16px 16px;
+    }
+    .bubble-assistant {
+      background: var(--surface-variant);
+      border-radius: 4px 16px 16px 16px;
+      display: inline-block;
+    }
+    .meta {
+      display: flex; align-items: center; gap: 4px;
+      font-size: 11px; color: var(--on-variant); margin-top: 2px;
+    }
+    .meta.right { justify-content: flex-end; padding-right: 4px; }
+    .meta.left { padding-left: 4px; }
+    .copy { font-size: 11px; opacity: .7; }
+    .card {
+      border-radius: 12px;
+      padding: 10px;
+      background: var(--surface-variant);
+    }
+    .card.error { background: var(--error-container); }
+    .card.bash { background: var(--bash-bg); color: var(--bash-fg); }
+    .card.read { background: var(--read-bg); border-left: 3px solid var(--read-accent); }
+    .card.write { background: var(--write-bg); border-left: 3px solid var(--write-accent); }
+    .card.edit { background: var(--edit-bg); border-left: 3px solid var(--edit-accent); }
+    .card.tool { background: var(--tool-bg); border-left: 3px solid var(--tool-accent); }
+    .card.thinking {
+      background: transparent;
+      border: 1px dashed var(--outline);
+      padding: 8px 10px;
+    }
+    .hdr {
+      display: flex; align-items: center; gap: 6px;
+      cursor: pointer; user-select: none;
+    }
+    .hdr .name {
+      flex: 1; min-width: 0;
+      font-size: 12px; font-weight: 650;
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+    .tool-name { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px; }
+    .chev { font-size: 14px; color: var(--on-variant); }
+    .card.bash .chev { color: #BDBDBD; }
+    .cmd, .path {
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 11px;
+      margin-top: 6px;
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+      word-break: break-word;
+    }
+    .cmd { color: var(--bash-cmd); }
+    .card.read .path { color: var(--read-accent); }
+    .card.write .path { color: var(--write-accent); }
+    .card.edit .path { color: var(--edit-accent); }
+    .card.tool .path { color: var(--tool-accent); }
+    .swatches { display: flex; flex-wrap: wrap; gap: 6px; margin: 10px 0 4px; }
+    .swatch {
+      display: flex; align-items: center; gap: 6px;
+      font-size: 12px; color: #c5d0d4;
+      background: #243034; border-radius: 8px; padding: 5px 8px;
+    }
+    .swatch i {
+      width: 12px; height: 12px; border-radius: 3px; display: inline-block;
+      border-left: 3px solid currentColor;
+    }
+    .swatch.read i { background: var(--read-bg); color: var(--read-accent); }
+    .swatch.write i { background: var(--write-bg); color: var(--write-accent); }
+    .swatch.edit i { background: var(--edit-bg); color: var(--edit-accent); }
+    .swatch.tool i { background: var(--tool-bg); color: var(--tool-accent); }
+    .swatch.bash i { background: var(--bash-bg); color: var(--bash-cmd); }
+    .preview, .body {
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 11px; color: var(--on-variant); margin-top: 6px; white-space: pre-wrap; word-break: break-word;
+    }
+    .card.bash .preview, .card.bash .body { color: var(--bash-fg); }
+    .preview { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .thinking .preview, .thinking .body {
+      font-family: inherit; font-size: 12px; color: var(--on-variant);
+    }
+    .thinking .name { font-weight: 500; font-size: 11px; color: var(--on-variant); font-style: italic; }
+    .badge { font-size: 12px; }
+    .md p { margin: 0 0 6px; }
+    .md p:last-child { margin-bottom: 0; }
+    .md h1, .md h2, .md h3 { margin: 0 0 6px; }
+    .md h1 { font-size: 20px; }
+    .md h2 { font-size: 16px; }
+    .md h3 { font-size: 14px; }
+    .md ul, .md ol { margin: 0 0 6px; padding-left: 1.2em; }
+    .md blockquote {
+      margin: 0 0 6px; padding-left: 8px;
+      border-left: 3px solid var(--outline); color: var(--on-variant);
+    }
+    .md hr { border: 0; border-top: 1px solid var(--outline); }
+    .md code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; background: rgba(136,136,136,.12); padding: 0 3px; border-radius: 3px; font-size: 12px; }
+    .md pre {
+      background: var(--code-bg); color: #D4D4D4; border-radius: 8px;
+      padding: 8px 10px; overflow-x: auto; font-size: 11px; line-height: 1.4;
+    }
+    .md pre code { background: none; color: inherit; padding: 0; }
+    .md a { color: var(--cyan); }
+    .md table { border-collapse: collapse; font-size: 12px; margin-bottom: 6px; }
+    .md th, .md td { border: 1px solid var(--outline); padding: 3px 6px; }
+    .empty { color: var(--on-variant); font-size: 13px; padding: 24px; text-align: center; }
+  </style>
+</head>
+<body>
+  <aside class="side">
+    <h1>PiPilot 消息展示样稿</h1>
+    <p>deb 上两段真实会话。左边改折叠/间距/字号，刷新即可，不用打 APK。定稿后再搬进 Compose。</p>
+    <div class="session-list" id="sessionList"></div>
+    <div class="toggles">
+      <label><input type="checkbox" id="expandAll"> 全部展开</label>
+      <label><input type="checkbox" id="hideThinking"> 隐藏 thinking</label>
+      <label><input type="checkbox" id="demoTools"> 插入 write / edit / 通用 tool 样例</label>
+      <label><input type="checkbox" id="darkPhone"> 深色手机框（仅背景试看）</label>
+      <div class="swatches">
+        <span class="swatch read"><i></i>read</span>
+        <span class="swatch write"><i></i>write</span>
+        <span class="swatch edit"><i></i>edit</span>
+        <span class="swatch tool"><i></i>其它 tool</span>
+        <span class="swatch bash"><i></i>bash</span>
+      </div>
+    </div>
+    <div class="notes">
+      <p><b>当前默认（对齐刚改的 App）</b></p>
+      <ul>
+        <li>thinking 是独立弱卡片（虚线框），不塞进助手气泡；时间戳仍挂在回复上。</li>
+        <li>颜色：read 青、write 琥珀、edit 紫；其它 tool 共用石板灰。bash 仍是深色终端。错误只改 ✓/✕。</li>
+        <li>bash 命令行始终显示全文（绿色，可换行）；折叠只收输出。</li>
+        <li>read 到 <code>.md</code> 时，展开按 Markdown 渲染。</li>
+      </ul>
+      <p>刷新数据：<code>scp 'deb:~/.pi/agent/sessions/--root--/*.jsonl' tools/chat-preview/sessions/</code> 然后 <code>python3 tools/chat-preview/parse_sessions.py</code></p>
+    </div>
+  </aside>
+  <main class="stage">
+    <div class="phone" id="phone">
+      <div class="status-bar"><span>9:41</span><span>PiPilot</span></div>
+      <div class="topbar">
+        <div>
+          <div class="title" id="barTitle">PiPilot</div>
+          <div class="sub" id="barSub"></div>
+        </div>
+      </div>
+      <div class="list" id="list"></div>
+      <div class="composer">
+        <div class="status-strip" id="strip"></div>
+        <div class="composer-row">
+          <div class="fake-input">Message pi</div>
+          <div class="send">➤</div>
+        </div>
+      </div>
+    </div>
+  </main>
+  <script src="fixtures.js"></script>
+  <script>
+    const PREVIEW_MAX = 160;
+    const EXPANDED_MAX = 32000;
+
+    function firstNonBlank(text) {
+      return (text || "").split(/\r?\n/).find(l => l.trim())?.trim() || "";
+    }
+    function lastNonBlank(text) {
+      return [...(text || "").split(/\r?\n/)].reverse().find(l => l.trim())?.trim() || "";
+    }
+    function clipPreview(line, fromEnd) {
+      if (line.length <= PREVIEW_MAX) return line;
+      return fromEnd ? "…" + line.slice(-(PREVIEW_MAX - 1)) : line.slice(0, PREVIEW_MAX - 1) + "…";
+    }
+    function expandedBody(text, fromEnd) {
+      if (!text) return "";
+      if (text.length <= EXPANDED_MAX) return text;
+      const omitted = text.length - EXPANDED_MAX;
+      return fromEnd
+        ? `…(truncated ${omitted} chars)\n` + text.slice(-EXPANDED_MAX)
+        : text.slice(0, EXPANDED_MAX) + `\n…(truncated ${omitted} chars)`;
+    }
+    function esc(s) {
+      return String(s)
+        .replaceAll("&", "&amp;")
+        .replaceAll("<", "&lt;")
+        .replaceAll(">", "&gt;");
+    }
+    function inlineMd(src) {
+      let s = esc(src);
+      s = s.replace(/`([^`]+)`/g, "<code>$1</code>");
+      s = s.replace(/\*\*([^*]+)\*\*/g, "<b>$1</b>");
+      s = s.replace(/~~([^~]+)~~/g, "<s>$1</s>");
+      s = s.replace(/(^|[^\w])\*([^*\s][^*]*)\*/g, "$1<i>$2</i>");
+      s = s.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2">$1</a>');
+      return s;
+    }
+    function renderMarkdown(src) {
+      if (!src) return "";
+      const lines = src.split(/\r?\n/);
+      const blocks = [];
+      let i = 0;
+      let para = [];
+      const flushPara = () => {
+        if (para.length) {
+          blocks.push(`<p>${inlineMd(para.join("\n"))}</p>`);
+          para = [];
+        }
+      };
+      while (i < lines.length) {
+        const line = lines[i];
+        const fence = line.match(/^```\s*(\S*)\s*$/);
+        const head = line.match(/^(#{1,6})\s+(.*)$/);
+        const bullet = line.match(/^\s*[-*+]\s+(.*)$/);
+        const ordered = line.match(/^\s*(\d{1,3})[.)]\s+(.*)$/);
+        const quote = line.match(/^\s*>\s?(.*)$/);
+        const rule = line.match(/^\s*([-*_])\1{2,}\s*$/);
+        const table = parseTable(lines, i);
+        if (fence) {
+          flushPara();
+          const code = [];
+          i++;
+          while (i < lines.length && !lines[i].match(/^```\s*(\S*)\s*$/)) {
+            code.push(lines[i]); i++;
+          }
+          i++;
+          blocks.push(`<pre><code>${esc(code.join("\n"))}</code></pre>`);
+        } else if (table) { flushPara(); blocks.push(table.html); i = table.next; }
+        else if (rule) { flushPara(); blocks.push("<hr>"); i++; }
+        else if (head) { flushPara(); const lv = head[1].length; blocks.push(`<h${Math.min(lv,3)}>${inlineMd(head[2])}</h${Math.min(lv,3)}>`); i++; }
+        else if (bullet) { flushPara(); blocks.push(`<ul><li>${inlineMd(bullet[1])}</li></ul>`); i++; }
+        else if (ordered) { flushPara(); blocks.push(`<ol start="${ordered[1]}"><li>${inlineMd(ordered[2])}</li></ol>`); i++; }
+        else if (quote) { flushPara(); blocks.push(`<blockquote>${inlineMd(quote[1])}</blockquote>`); i++; }
+        else if (!line.trim()) { flushPara(); i++; }
+        else { para.push(line); i++; }
+      }
+      flushPara();
+      return `<div class="md">${mergeLists(blocks).join("")}</div>`;
+    }
+    function mergeLists(blocks) {
+      const out = [];
+      for (const b of blocks) {
+        const prev = out[out.length - 1];
+        if (prev && prev.startsWith("<ul>") && b.startsWith("<ul>")) {
+          out[out.length - 1] = prev.replace("</ul>", "") + b.replace("<ul>", "");
+        } else if (prev && prev.startsWith("<ol") && b.startsWith("<ol")) {
+          out[out.length - 1] = prev.replace("</ol>", "") + b.replace(/<ol[^>]*>/, "");
+        } else out.push(b);
+      }
+      return out;
+    }
+    function looksLikeTableRow(line) {
+      const t = line.trim();
+      return t.startsWith("|") && t.endsWith("|") && t.includes("|", 1);
+    }
+    function looksLikeTableSep(line) {
+      return /^\s*\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?\s*$/.test(line);
+    }
+    function parseTable(lines, start) {
+      if (!looksLikeTableRow(lines[start]) || start + 1 >= lines.length || !looksLikeTableSep(lines[start + 1])) return null;
+      const split = (row) => row.trim().replace(/^\|/, "").replace(/\|$/, "").split("|").map(c => c.trim());
+      const head = split(lines[start]);
+      const rows = [];
+      let i = start + 2;
+      while (i < lines.length && looksLikeTableRow(lines[i])) {
+        rows.push(split(lines[i])); i++;
+      }
+      const th = head.map(c => `<th>${inlineMd(c)}</th>`).join("");
+      const tr = rows.map(r => `<tr>${r.map(c => `<td>${inlineMd(c)}</td>`).join("")}</tr>`).join("");
+      return { html: `<table><thead><tr>${th}</tr></thead><tbody>${tr}</tbody></table>`, next: i };
+    }
+    function isMarkdownPath(path) {
+      return /\.(md|markdown|mdx)$/i.test(path || "");
+    }
+
+    let active = 0;
+    const userExpanded = new Map();
+
+    function isExpanded(key, activeDefault) {
+      if (document.getElementById("expandAll").checked) return true;
+      if (userExpanded.has(key)) return userExpanded.get(key);
+      return activeDefault;
+    }
+    function toggle(key, current) {
+      userExpanded.set(key, !current);
+      const list = document.getElementById("list");
+      const y = list.scrollTop;
+      render({ pinBottom: false });
+      list.scrollTop = y;
+    }
+
+    function collapseBlock({key, title, preview, body, bodyHtml = "", extraClass = "", nameClass = "", leading = "", trailing = "", defaultExpanded = false, command = "", path = ""}) {
+      const expanded = isExpanded(key, defaultExpanded);
+      const chev = expanded ? "▴" : "▾";
+      const cmdLine = command ? `<div class="cmd">${esc(command)}</div>` : (path ? `<div class="path">${esc(path)}</div>` : "");
+      let inner = "";
+      if (expanded) {
+        if (bodyHtml) inner = `<div class="body">${bodyHtml}</div>`;
+        else if (body) inner = `<div class="body">${esc(body)}</div>`;
+      } else if (preview) {
+        inner = `<div class="preview">${esc(preview)}</div>`;
+      }
+      return `<div class="card ${extraClass}">
+        <div class="hdr" onclick="toggle(${JSON.stringify(key)}, ${expanded})">
+          ${leading}
+          <div class="name ${nameClass}">${esc(title)}</div>
+          ${trailing}
+          <div class="chev">${chev}</div>
+        </div>
+        ${cmdLine}
+        ${inner}
+      </div>`;
+    }
+
+    function renderItem(it) {
+      if (it.kind === "user") {
+        return `<div>
+          <div class="row-user"><div class="bubble bubble-user">${esc(it.text)}</div></div>
+          <div class="meta right">${esc(it.time || "")} <span class="copy">⧉</span></div>
+        </div>`;
+      }
+      if (it.kind === "assistant") {
+        const hideThinking = document.getElementById("hideThinking").checked;
+        const parts = [];
+        if (it.thinking && !hideThinking) {
+          parts.push(collapseBlock({
+            key: it.key + "-think",
+            title: "Thinking",
+            preview: clipPreview(firstNonBlank(it.thinking), false),
+            body: expandedBody(it.thinking, false),
+            extraClass: "thinking",
+          }));
+        }
+        if (it.text) {
+          parts.push(`<div>
+            <div class="row-assistant">
+              <div class="bubble bubble-assistant">${renderMarkdown(it.text)}</div>
+            </div>
+            <div class="meta left">${esc(it.time || "")} <span class="copy">⧉</span></div>
+          </div>`);
+        }
+        return parts.join("");
+      }
+      if (it.kind === "tool") {
+        const name = (it.toolName || "tool").toLowerCase();
+        const trailing = it.isError
+          ? `<span class="badge" style="color:var(--error)">✕</span>`
+          : `<span class="badge" style="color:var(--ok)">✓</span>`;
+        if (name === "bash") {
+          const cmd = it.args || "";
+          return collapseBlock({
+            key: it.key,
+            title: "bash",
+            command: cmd ? "$ " + cmd : "",
+            preview: it.output ? clipPreview(lastNonBlank(it.output), true) : "",
+            body: it.output ? expandedBody(it.output, true) : "",
+            extraClass: "bash",
+            nameClass: "tool-name",
+            leading: `<span>🛠</span>`,
+            trailing,
+          });
+        }
+        const fileFamily = name === "read" || name === "write" || name === "edit";
+        const path = it.args || "";
+        const md = name === "read" && isMarkdownPath(path) && it.output;
+        const previewSrc = it.output ? lastNonBlank(it.output) : firstNonBlank(path);
+        const familyClass = fileFamily ? name : "tool";
+        return collapseBlock({
+          key: it.key,
+          title: it.toolName || "tool",
+          path: path && fileFamily ? path : "",
+          preview: clipPreview(previewSrc, !!it.output),
+          body: md ? "" : [path && !fileFamily ? path : "", it.output ? expandedBody(it.output, true) : ""].filter(Boolean).join("\n\n"),
+          bodyHtml: md ? renderMarkdown(expandedBody(it.output, false)) : "",
+          extraClass: familyClass,
+          nameClass: "tool-name",
+          leading: `<span>${fileFamily ? "📄" : "🛠"}</span>`,
+          trailing,
+        });
+      }
+      if (it.kind === "bash") {
+        const cmd = it.command || "";
+        return collapseBlock({
+          key: it.key,
+          title: "bash",
+          command: cmd ? "$ " + cmd : "",
+          preview: it.output ? clipPreview(lastNonBlank(it.output), true) : "",
+          body: it.output ? expandedBody(it.output, true) : "",
+          extraClass: "bash",
+        });
+      }
+      return "";
+    }
+
+    function render({ pinBottom = true } = {}) {
+      const sessions = window.SESSIONS || [];
+      const s = sessions[active];
+      const list = document.getElementById("list");
+      if (!s) { list.innerHTML = `<div class="empty">没有会话数据。先跑 parse_sessions.py</div>`; return; }
+      document.getElementById("barTitle").textContent = s.meta.title || "PiPilot";
+      document.getElementById("barSub").textContent = s.meta.model || "";
+      document.getElementById("strip").textContent =
+        [s.meta.model, s.meta.thinkingLevel && ("think " + s.meta.thinkingLevel), s.meta.cwd].filter(Boolean).join(" · ");
+      const extras = document.getElementById("demoTools").checked ? DEMO_TOOLS : [];
+      list.innerHTML = [...s.items, ...extras].map(renderItem).join("") || `<div class="empty">空会话</div>`;
+      if (pinBottom) list.scrollTop = list.scrollHeight;
+    }
+
+    function renderSessionButtons() {
+      const box = document.getElementById("sessionList");
+      box.innerHTML = (window.SESSIONS || []).map((s, i) => {
+        const kinds = {};
+        for (const it of s.items) kinds[it.kind] = (kinds[it.kind] || 0) + 1;
+        const summary = Object.entries(kinds).map(([k,v]) => `${k} ${v}`).join(" · ");
+        return `<button class="session-btn ${i===active?"active":""}" onclick="active=${i}; userExpanded.clear(); render(); renderSessionButtons()">
+          <b>${esc(s.meta.title)}</b>
+          <span>${esc(s.meta.model)} · ${s.meta.count} items<br>${esc(summary)}</span>
+        </button>`;
+      }).join("");
+    }
+
+    const DEMO_TOOLS = [
+      { kind: "tool", key: "demo-write", toolName: "write", args: "/root/notes.md", output: "# Hello\n\nWrote this file.", running: false, isError: false },
+      { kind: "tool", key: "demo-edit", toolName: "edit", args: "/etc/default/locale", output: "replaced LANG line", running: false, isError: false },
+      { kind: "tool", key: "demo-generic", toolName: "grep", args: "vnstat", output: "/root/notes.md:3:vnstat -d", running: false, isError: false },
+    ];
+    document.getElementById("expandAll").addEventListener("change", render);
+    document.getElementById("hideThinking").addEventListener("change", render);
+    document.getElementById("demoTools").addEventListener("change", render);
+    document.getElementById("darkPhone").addEventListener("change", (e) => {
+      const phone = document.getElementById("phone");
+      if (e.target.checked) {
+        phone.style.setProperty("--surface", "#121416");
+        phone.style.setProperty("--surface-variant", "#2A3134");
+        phone.style.setProperty("--on-surface", "#E8EEF0");
+        phone.style.setProperty("--on-variant", "#A7B4B8");
+        phone.style.background = "#121416";
+        phone.querySelector(".topbar").style.background = "#1A1F21";
+        phone.querySelector(".topbar").style.borderBottomColor = "#2A3134";
+        phone.querySelector(".composer").style.background = "#1A1F21";
+        phone.querySelector(".composer").style.borderTopColor = "#2A3134";
+        phone.querySelector(".fake-input").style.borderColor = "#3A4448";
+        phone.querySelector(".fake-input").style.color = "#78909C";
+      } else {
+        location.reload();
+      }
+    });
+
+    renderSessionButtons();
+    render();
+  </script>
+</body>
+</html>

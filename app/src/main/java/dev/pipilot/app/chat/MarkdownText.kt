@@ -42,7 +42,7 @@ import androidx.compose.ui.unit.sp
 /**
  * Lightweight Markdown rendering: pi replies are mostly markdown, and plain Text turns them into a blob.
  * Supports headings, unordered/ordered lists, quotes, rules, fenced code (simple highlighting),
- * inline code, bold, italic, strikethrough, and links.
+ * GFM tables, inline code, bold, italic, strikethrough, and links.
  * No third-party library on purpose (deps would need a proxy; this subset is enough for chat);
  * text that does not parse as structure is shown as-is.
  */
@@ -55,6 +55,7 @@ private sealed interface MdBlock {
     data class Code(val lang: String?, val code: String) : MdBlock
     data class ListItem(val marker: String, val text: String) : MdBlock
     data class Quote(val text: String) : MdBlock
+    data class Table(val headers: List<String>, val rows: List<List<String>>) : MdBlock
     data object Rule : MdBlock
 }
 
@@ -82,6 +83,7 @@ private fun parseBlocks(src: String): List<MdBlock> {
         val orderedM = orderedRegex.matchEntire(line)
         val quoteM = quoteRegex.matchEntire(line)
         val ruleM = ruleRegex.matchEntire(line)
+        val table = parseTable(lines, i)
         when {
             fenceM != null -> {
                 flushPara()
@@ -94,6 +96,11 @@ private fun parseBlocks(src: String): List<MdBlock> {
                 }
                 i++ // skip closing ``` (or EOF)
                 blocks.add(MdBlock.Code(lang, code.toString().trimEnd('\n', '\r')))
+            }
+            table != null -> {
+                flushPara()
+                blocks.add(table.first)
+                i = table.second
             }
             ruleM != null -> { flushPara(); blocks.add(MdBlock.Rule); i++ }
             headM != null -> {
@@ -114,6 +121,35 @@ private fun parseBlocks(src: String): List<MdBlock> {
     }
     flushPara()
     return blocks
+}
+
+/** Test hook: whether [src] parsed at least one GFM table. */
+internal fun markdownContainsTable(src: String): Boolean =
+    parseBlocks(src).any { it is MdBlock.Table }
+
+private val tableSepRegex = Regex("""^\s*\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?\s*$""")
+
+private fun looksLikeTableRow(line: String): Boolean {
+    val t = line.trim()
+    return t.startsWith("|") && t.endsWith("|") && t.indexOf('|', 1) > 0
+}
+
+private fun splitTableRow(line: String): List<String> =
+    line.trim().removePrefix("|").removeSuffix("|").split("|").map { it.trim() }
+
+/** GFM table starting at [start]; null if this line is not a header+separator pair. */
+private fun parseTable(lines: List<String>, start: Int): Pair<MdBlock.Table, Int>? {
+    if (start + 1 >= lines.size) return null
+    if (!looksLikeTableRow(lines[start]) || !tableSepRegex.matches(lines[start + 1])) return null
+    val headers = splitTableRow(lines[start])
+    if (headers.isEmpty()) return null
+    val rows = ArrayList<List<String>>()
+    var i = start + 2
+    while (i < lines.size && looksLikeTableRow(lines[i])) {
+        rows.add(splitTableRow(lines[i]))
+        i++
+    }
+    return MdBlock.Table(headers, rows) to i
 }
 
 // ---------- Inline parse ----------
@@ -375,6 +411,36 @@ fun MarkdownText(markdown: String, modifier: Modifier = Modifier) {
                         .height(1.dp)
                         .background(MaterialTheme.colorScheme.outlineVariant)
                 )
+                is MdBlock.Table -> MdTable(b)
+            }
+        }
+    }
+}
+
+@Composable
+private fun MdTable(block: MdBlock.Table) {
+    val cols = block.headers.size
+    Column(Modifier.horizontalScroll(rememberScrollState())) {
+        Row {
+            block.headers.forEach { h ->
+                Text(
+                    inlineText(h),
+                    style = MaterialTheme.typography.labelSmall,
+                    fontWeight = FontWeight.SemiBold,
+                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 3.dp),
+                )
+            }
+        }
+        Box(Modifier.fillMaxWidth().height(1.dp).background(MaterialTheme.colorScheme.outlineVariant))
+        block.rows.forEach { row ->
+            Row {
+                for (c in 0 until cols) {
+                    Text(
+                        inlineText(row.getOrElse(c) { "" }),
+                        style = MaterialTheme.typography.bodySmall,
+                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 3.dp),
+                    )
+                }
             }
         }
     }
