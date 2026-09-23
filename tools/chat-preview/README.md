@@ -35,3 +35,4 @@
 - read 到 `.md` / `.markdown` / `.mdx` 时，展开按 Markdown 渲染
 - 助手气泡 wrap-content，无 320dp 上限
 - Copy 只是占位，不写剪贴板
+- 助手气泡时间戳旁 mock TTFT / tok/s（首轮有 TTFT，工具后续写只有 tok/s）；左侧可关「显示 TTFT / tok/s」，可关「插入流式气泡样例」

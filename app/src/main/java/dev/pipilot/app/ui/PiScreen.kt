@@ -118,6 +118,7 @@ import dev.pipilot.app.chat.ChatItem
 import dev.pipilot.app.chat.MarkdownText
 import dev.pipilot.app.chat.ToolFamily
 import dev.pipilot.app.chat.copyText
+import dev.pipilot.app.chat.formatGenerationSpeed
 import dev.pipilot.app.ui.theme.ChatPalette
 import dev.pipilot.app.keepalive.ConnectionKeepAliveService
 import dev.pipilot.app.log.AppLog
@@ -682,6 +683,8 @@ private fun UserBubble(item: ChatItem.UserText) {
 private fun AssistantBubble(item: ChatItem.AssistantText) {
     val copy = item.copyText()
     val hasText = item.text.isNotBlank() || item.streaming
+    val speedText = formatGenerationSpeed(item.speed, streaming = item.streaming)
+    val showMeta = item.timeMs > 0 || speedText.isNotEmpty() || (copy != null && !item.streaming)
     Column(modifier = Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
         if (!item.thinking.isNullOrBlank()) {
             ThinkingCard(thinking = item.thinking, streaming = item.streaming)
@@ -702,24 +705,37 @@ private fun AssistantBubble(item: ChatItem.AssistantText) {
                         if (item.streaming) body() else SelectionContainer { body() }
                     }
                 }
-                if (!item.streaming) {
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(2.dp),
-                        modifier = Modifier.padding(start = 4.dp, top = 2.dp),
-                    ) {
-                        if (item.timeMs > 0) {
-                            Text(
-                                dev.pipilot.app.chat.formatShanghai(item.timeMs),
-                                style = MaterialTheme.typography.labelSmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            )
-                        }
-                        if (copy != null) CopyItemButton(copy)
-                    }
-                }
+                if (showMeta) AssistantMeta(item, copy, speedText)
             }
+        } else if (showMeta) {
+            // thinking-only reply: hang the footnote under the thinking card
+            AssistantMeta(item, copy, speedText)
         }
+    }
+}
+
+@Composable
+private fun AssistantMeta(item: ChatItem.AssistantText, copy: String?, speedText: String) {
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(6.dp),
+        modifier = Modifier.padding(start = 4.dp, top = 2.dp),
+    ) {
+        if (item.timeMs > 0) {
+            Text(
+                dev.pipilot.app.chat.formatShanghai(item.timeMs),
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+        if (speedText.isNotEmpty()) {
+            Text(
+                speedText,
+                style = MaterialTheme.typography.labelSmall.copy(fontFeatureSettings = "tnum"),
+                color = if (item.streaming) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+        if (!item.streaming && copy != null) CopyItemButton(copy)
     }
 }
 

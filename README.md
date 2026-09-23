@@ -69,7 +69,8 @@ Session dumps and generated `fixtures.js` are gitignored. Commands and current m
 - **Core chat**: send prompts, stream replies (`text_delta` assembly), abort
   (clear_queue then abort; queue text is restored into the composer), while streaming
   you can steer (after current tools) or queue a follow-up (after the agent settles);
-  `queue_update` shows pending deliveries
+  `queue_update` shows pending deliveries. Each live / just-finished assistant
+  bubble shows client-timed `TTFT` and `tok/s` (history has no footnote)
 - **Tool visualization**: `tool_execution_start/update/end` as tool cards with live
   args and cumulative output for bash/read/write; direct `bash` command output also
   gets a terminal-style card

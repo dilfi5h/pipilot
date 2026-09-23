@@ -156,12 +156,27 @@
       display: inline-block;
     }
     .meta {
-      display: flex; align-items: center; gap: 4px;
+      display: flex; align-items: center; gap: 6px;
       font-size: 11px; color: var(--on-variant); margin-top: 2px;
     }
     .meta.right { justify-content: flex-end; padding-right: 4px; }
     .meta.left { padding-left: 4px; }
     .copy { font-size: 11px; opacity: .7; }
+    .speed {
+      font-variant-numeric: tabular-nums;
+      letter-spacing: 0.01em;
+    }
+    .speed.live { color: var(--cyan); }
+    .cursor {
+      display: inline-block;
+      width: 7px;
+      height: 14px;
+      margin-left: 2px;
+      background: var(--on-surface);
+      vertical-align: text-bottom;
+      animation: blink 1s steps(1) infinite;
+    }
+    @keyframes blink { 50% { opacity: 0; } }
     .card {
       border-radius: 12px;
       padding: 10px;
@@ -262,6 +277,8 @@
       <label><input type="checkbox" id="expandAll"> 全部展开</label>
       <label><input type="checkbox" id="hideThinking"> 隐藏 thinking</label>
       <label><input type="checkbox" id="demoTools"> 插入 write / edit / 通用 tool 样例</label>
+      <label><input type="checkbox" id="showSpeed" checked> 显示 TTFT / tok/s</label>
+      <label><input type="checkbox" id="demoLive" checked> 插入流式气泡样例</label>
       <label><input type="checkbox" id="darkPhone"> 深色手机框（仅背景试看）</label>
       <div class="swatches">
         <span class="swatch read"><i></i>read</span>
@@ -278,6 +295,7 @@
         <li>颜色：read 青、write 琥珀、edit 紫；其它 tool 共用石板灰。bash 仍是深色终端。错误只改 ✓/✕。</li>
         <li>bash 命令行始终显示全文（绿色，可换行）；折叠只收输出。</li>
         <li>read 到 <code>.md</code> 时，展开按 Markdown 渲染。</li>
+        <li>助手气泡时间戳旁挂本条速度：<code>TTFT 1.2s · 38 tok/s</code>。首轮有 TTFT，工具后续写只留 tok/s。流式 tok/s 带 <code>~</code> 表示估算；等待首 token 时气泡只有光标、不写速度。</li>
       </ul>
       <p>刷新数据：<code>scp 'deb:~/.pi/agent/sessions/--root--/*.jsonl' tools/chat-preview/sessions/</code> 然后 <code>python3 tools/chat-preview/parse_sessions.py</code></p>
     </div>
@@ -417,6 +435,58 @@
       return /\.(md|markdown|mdx)$/i.test(path || "");
     }
 
+    /** Format a per-bubble speed footnote: "TTFT 1.2s · 38 tok/s". */
+    function formatSpeed(it) {
+      if (!document.getElementById("showSpeed").checked) return "";
+      const parts = [];
+      if (it.ttftMs != null && it.ttftMs >= 0) {
+        parts.push("TTFT " + formatDuration(it.ttftMs));
+      }
+      if (it.toksPerSec != null && it.toksPerSec > 0) {
+        const n = it.toksPerSec;
+        const shown = n >= 100 ? n.toFixed(0) : n.toFixed(1);
+        parts.push((it.speedEstimated ? "~" : "") + shown + " tok/s");
+      } else if (it.streaming && it.ttftMs == null) {
+        parts.push("waiting…");
+      }
+      return parts.length ? `<span class="speed${it.streaming ? " live" : ""}">${parts.join(" · ")}</span>` : "";
+    }
+    function formatDuration(ms) {
+      if (ms < 1000) return Math.round(ms) + "ms";
+      const s = ms / 1000;
+      return (s >= 10 ? s.toFixed(1) : s.toFixed(2)) + "s";
+    }
+    /** Stable mock numbers per assistant key so refresh doesn't jump. */
+    function mockSpeedFor(it, index) {
+      // Explicit fields (including null) mean "already decided"; don't overwrite demo rows.
+      if (Object.prototype.hasOwnProperty.call(it, "ttftMs") || Object.prototype.hasOwnProperty.call(it, "toksPerSec")) {
+        return it;
+      }
+      if (it.kind !== "assistant") return it;
+      const seed = hashKey(it.key || String(index));
+      const ttft = it.firstOfTurn ? 420 + (seed % 2800) : null; // 0.42s–3.2s; continuations omit TTFT
+      const toks = 8 + (seed % 72) + ((seed >> 3) % 10) / 10; // ~8–80
+      return { ...it, ttftMs: ttft, toksPerSec: toks, speedEstimated: false };
+    }
+    function withMockSpeed(items) {
+      let awaitingTurn = true;
+      return items.map((it, index) => {
+        if (it.kind === "user") {
+          awaitingTurn = true;
+          return it;
+        }
+        if (it.kind !== "assistant") return it;
+        const tagged = { ...it, firstOfTurn: it.firstOfTurn ?? awaitingTurn };
+        awaitingTurn = false;
+        return mockSpeedFor(tagged, index);
+      });
+    }
+    function hashKey(s) {
+      let h = 0;
+      for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) | 0;
+      return Math.abs(h);
+    }
+
     let active = 0;
     const userExpanded = new Map();
 
@@ -475,13 +545,22 @@
             extraClass: "thinking",
           }));
         }
-        if (it.text) {
+        const speed = formatSpeed(it);
+        if (it.text || it.streaming) {
+          const cursor = it.streaming ? `<span class="cursor"></span>` : "";
+          const time = it.time ? esc(it.time) : "";
+          const copy = it.streaming ? "" : `<span class="copy">⧉</span>`;
+          const metaBits = [time, speed, copy].filter(Boolean).join(" ");
           parts.push(`<div>
             <div class="row-assistant">
-              <div class="bubble bubble-assistant">${renderMarkdown(it.text)}</div>
+              <div class="bubble bubble-assistant">${it.text ? renderMarkdown(it.text) : ""}${cursor}</div>
             </div>
-            <div class="meta left">${esc(it.time || "")} <span class="copy">⧉</span></div>
+            ${metaBits ? `<div class="meta left">${metaBits}</div>` : ""}
           </div>`);
+        } else if (speed) {
+          // thinking-only reply: no text bubble, still hang the footnote under thinking
+          const time = it.time ? esc(it.time) : "";
+          parts.push(`<div class="meta left">${[time, speed].filter(Boolean).join(" ")}</div>`);
         }
         return parts.join("");
       }
@@ -545,8 +624,12 @@
       document.getElementById("barSub").textContent = s.meta.model || "";
       document.getElementById("strip").textContent =
         [s.meta.model, s.meta.thinkingLevel && ("think " + s.meta.thinkingLevel), s.meta.cwd].filter(Boolean).join(" · ");
-      const extras = document.getElementById("demoTools").checked ? DEMO_TOOLS : [];
-      list.innerHTML = [...s.items, ...extras].map(renderItem).join("") || `<div class="empty">空会话</div>`;
+      const extras = [
+        ...(document.getElementById("demoTools").checked ? DEMO_TOOLS : []),
+        ...(document.getElementById("demoLive").checked ? DEMO_LIVE : []),
+      ];
+      const items = withMockSpeed([...s.items, ...extras]);
+      list.innerHTML = items.map(renderItem).join("") || `<div class="empty">空会话</div>`;
       if (pinBottom) list.scrollTop = list.scrollHeight;
     }
 
@@ -568,9 +651,36 @@
       { kind: "tool", key: "demo-edit", toolName: "edit", args: "/etc/default/locale", output: "replaced LANG line", running: false, isError: false },
       { kind: "tool", key: "demo-generic", toolName: "grep", args: "vnstat", output: "/root/notes.md:3:vnstat -d", running: false, isError: false },
     ];
+    const DEMO_LIVE = [
+      {
+        kind: "assistant",
+        key: "demo-live-wait",
+        text: "",
+        thinking: null,
+        streaming: true,
+        time: "",
+        firstOfTurn: true,
+        ttftMs: null,
+        toksPerSec: null,
+      },
+      {
+        kind: "assistant",
+        key: "demo-live-stream",
+        text: "Streaming a reply so you can compare live speed against finished bubbles.",
+        thinking: null,
+        streaming: true,
+        time: "12:41:08",
+        firstOfTurn: true,
+        ttftMs: 1180,
+        toksPerSec: 24.3,
+        speedEstimated: true,
+      },
+    ];
     document.getElementById("expandAll").addEventListener("change", render);
     document.getElementById("hideThinking").addEventListener("change", render);
     document.getElementById("demoTools").addEventListener("change", render);
+    document.getElementById("showSpeed").addEventListener("change", render);
+    document.getElementById("demoLive").addEventListener("change", render);
     document.getElementById("darkPhone").addEventListener("change", (e) => {
       const phone = document.getElementById("phone");
       if (e.target.checked) {

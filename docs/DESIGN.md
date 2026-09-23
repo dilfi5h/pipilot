@@ -119,6 +119,15 @@ Clients must assemble by `contentIndex`. `StreamReducer` state machine:
 - **`tool_execution_update.partialResult` is cumulative output** (not a delta);
   replace the card wholesale, which is also the docs' recommended display.
 
+Generation speed is **client-timed**, not a pi RPC field. `StreamReducer` records
+local arrival times: `t_start` is `agent_start` for the first LLM call of a turn
+(user-perceived wait) or `message_start` after tools; `t_first` / `t_last` are
+the first and last `thinking_delta` / `text_delta`. TTFT = `t_first − t_start`
+and is omitted on continuations. toks/s = `(output − 1) / (t_last − t_first)`
+using `usage.output` when the provider reports it, otherwise `chars / 4` with a
+`~` prefix while streaming. History loaded via `get_entries` has no timing and
+shows no footnote. The numbers hang on the assistant bubble, not the status strip.
+
 ### 3.4 UI item reduction (merge strategy)
 
 `StreamReducer` emits "delta ops"; `PiViewModel.mergeItems` folds them into the

@@ -13,6 +13,81 @@ fun formatShanghai(millis: Long): String {
     return f.format(Date(millis))
 }
 
+/**
+ * Per-assistant-bubble generation speed, timed on the client from RPC events.
+ * `null` on the item means "don't show" (history / no timing). A non-null value
+ * with [waiting] is the pre-token cursor footnote.
+ */
+@Immutable
+data class GenerationSpeed(
+    val ttftMs: Long? = null,
+    val toksPerSec: Double? = null,
+    val estimated: Boolean = false,
+    val waiting: Boolean = false,
+)
+
+fun formatGenerationSpeed(speed: GenerationSpeed?, streaming: Boolean = false): String {
+    if (speed == null) return ""
+    if (speed.waiting) return "waiting…"
+    val parts = ArrayList<String>(2)
+    speed.ttftMs?.let { parts.add("TTFT ${formatDuration(it)}") }
+    val rate = speed.toksPerSec
+    if (rate != null && rate > 0.0) {
+        val prefix = if (speed.estimated) "~" else ""
+        parts.add("$prefix${formatToksPerSec(rate)} tok/s")
+    } else if (speed.ttftMs != null && !streaming) {
+        parts.add("—")
+    }
+    return parts.joinToString(" · ")
+}
+
+fun formatDuration(ms: Long): String {
+    if (ms < 1000) return "${ms}ms"
+    val s = ms / 1000.0
+    return if (s >= 10.0) {
+        String.format(Locale.US, "%.1fs", s)
+    } else {
+        String.format(Locale.US, "%.2fs", s)
+    }
+}
+
+fun formatToksPerSec(n: Double): String =
+    if (n >= 100.0) String.format(Locale.US, "%.0f", n)
+    else String.format(Locale.US, "%.1f", n)
+
+/**
+ * Decode rate from client-side timestamps.
+ * TTFT is only filled for the first LLM call of a turn.
+ * toks/s uses (tokens - 1) / (last - first) so the wait for the first token is not counted twice.
+ */
+fun computeGenerationSpeed(
+    startMs: Long,
+    firstMs: Long?,
+    lastMs: Long?,
+    outputTokens: Long?,
+    firstOfTurn: Boolean,
+    estimated: Boolean,
+    streaming: Boolean,
+): GenerationSpeed? {
+    if (firstMs == null) {
+        return if (streaming) GenerationSpeed(waiting = true) else null
+    }
+    val ttft = if (firstOfTurn) (firstMs - startMs).coerceAtLeast(0) else null
+    val last = lastMs ?: firstMs
+    val dt = last - firstMs
+    val toks = if (outputTokens != null && outputTokens >= 2 && dt > 0) {
+        (outputTokens - 1).toDouble() / (dt / 1000.0)
+    } else {
+        null
+    }
+    return GenerationSpeed(
+        ttftMs = ttft,
+        toksPerSec = toks,
+        estimated = estimated && toks != null,
+        waiting = false,
+    )
+}
+
 /** One row in the chat list. Messages and tool runs are unified into renderable items. */
 @Immutable
 sealed interface ChatItem {
@@ -35,6 +110,7 @@ sealed interface ChatItem {
         val streaming: Boolean,
         override val key: String,
         override val timeMs: Long = 0,
+        val speed: GenerationSpeed? = null,
     ) : ChatItem
 
     @Immutable

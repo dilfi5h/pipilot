@@ -1,7 +1,6 @@
 package dev.pipilot.app.chat
 
 import dev.pipilot.app.rpc.ChatMessage
-import dev.pipilot.app.rpc.ContentBlock
 import dev.pipilot.app.rpc.PiEvent
 
 /**
@@ -11,8 +10,14 @@ import dev.pipilot.app.rpc.PiEvent
  * - message_update has no snapshot; accumulate with contentIndex + delta
  * - tool_execution_update.partialResult is cumulative output; replace in place
  * - message_end.message is authoritative: emit the final bubble; the VM drops live (see RemoveLive)
+ *
+ * Generation speed (TTFT / tok/s) is timed on this client from event arrival:
+ * [nowMs] is injectable so tests can pin timestamps. History items never go through
+ * this path and stay without speed.
  */
-class StreamReducer {
+class StreamReducer(
+    private val nowMs: () -> Long = { System.currentTimeMillis() },
+) {
 
     /** Sentinel: VM drops the live bubble after receiving this (used when message_end commits the final). */
     data object RemoveLive : ChatItem {
@@ -25,6 +30,15 @@ class StreamReducer {
     // In-flight toolcall: name plus accumulated args
     private val liveToolCalls = LinkedHashMap<String, LiveToolCall>()
     private var streaming = false
+
+    // Timing window for the assistant message currently streaming. startMs is
+    // null until agent_start / the first assistant message_start; 0 is a valid clock.
+    private var startMs: Long? = null
+    private var firstMs: Long? = null
+    private var lastMs: Long? = null
+    private var outputTokens: Long? = null
+    private var usageFromProvider: Boolean = false
+    private var firstOfTurn: Boolean = true
 
     private data class LiveToolCall(
         val id: String,
@@ -39,26 +53,53 @@ class StreamReducer {
                 liveText = StringBuilder()
                 liveThinking = StringBuilder()
                 liveToolCalls.clear()
+                resetTiming(firstOfTurn = true)
                 // Plant an empty bubble as soon as the agent starts: the pre-token thinking
                 // window (10–40s) still needs a blinking cursor, or the UI looks dead.
-                sink(ChatItem.AssistantText(text = "", thinking = null, streaming = true, key = "live"))
+                sink(
+                    ChatItem.AssistantText(
+                        text = "",
+                        thinking = null,
+                        streaming = true,
+                        key = "live",
+                        speed = currentSpeed(streaming = true),
+                    ),
+                )
+            }
+
+            "message_start" -> {
+                val msgObj = event.message ?: return
+                val msg = ChatMessage.from(msgObj)
+                if (msg.role != "assistant") return
+                // First assistant of the run keeps agent_start as t_start (user-perceived TTFT).
+                // After tools, this is a new LLM call: restart the window and omit TTFT.
+                // No agent_start (reconnect mid-stream): start the window here.
+                if (startMs == null) {
+                    resetTiming(firstOfTurn = true)
+                } else if (!firstOfTurn || firstMs != null) {
+                    resetTiming(firstOfTurn = false)
+                }
             }
 
             "message_update" -> {
                 val d = event.delta ?: return
+                noteProviderUsage(event.usage)
                 when (d.type) {
                     "text_delta" -> {
                         liveText.append(d.delta ?: "")
+                        stampToken()
                         emitLive(sink)
                     }
                     "thinking_delta" -> {
                         liveThinking.append(d.delta ?: "")
+                        stampToken()
                         emitLive(sink)
                     }
                     "text_end" -> {
                         // Authoritative full text; overwrite
                         if (d.content != null) {
                             liveText = StringBuilder(d.content)
+                            if (firstMs == null) stampToken()
                             emitLive(sink)
                         }
                     }
@@ -109,11 +150,19 @@ class StreamReducer {
                 val msgObj = event.message ?: return
                 val msg = ChatMessage.from(msgObj)
                 if (msg.role != "assistant") return
+                noteProviderUsage(msgObj["usage"] as? kotlinx.serialization.json.JsonObject)
+                // Close the decode window at message_end so a single fat delta still gets a rate.
+                if (firstMs != null) lastMs = nowMs()
                 flushAssistantFromMessage(msg, sink)
                 liveText = StringBuilder()
                 liveThinking = StringBuilder()
                 liveToolCalls.clear()
                 streaming = false
+                firstOfTurn = false
+                firstMs = null
+                lastMs = null
+                outputTokens = null
+                usageFromProvider = false
                 sink(RemoveLive)
             }
 
@@ -157,7 +206,15 @@ class StreamReducer {
         if (liveText.isEmpty() && liveThinking.isEmpty()) return
         val text = liveText.toString()
         val thinking = liveThinking.toString().ifEmpty { null }
-        sink(ChatItem.AssistantText(text = text, thinking = thinking, streaming = true, key = "live"))
+        sink(
+            ChatItem.AssistantText(
+                text = text,
+                thinking = thinking,
+                streaming = true,
+                key = "live",
+                speed = currentSpeed(streaming = true),
+            ),
+        )
     }
 
     private fun emitToolCard(
@@ -188,9 +245,52 @@ class StreamReducer {
                 text = text.toString(),
                 thinking = thinking.toString().ifEmpty { null },
                 streaming = false,
-                key = "assistant-final-${msg.timestamp ?: System.currentTimeMillis()}-${System.nanoTime()}",
-                timeMs = msg.timestamp ?: System.currentTimeMillis(),
+                key = "assistant-final-${msg.timestamp ?: nowMs()}-${System.nanoTime()}",
+                timeMs = msg.timestamp ?: nowMs(),
+                speed = currentSpeed(streaming = false),
             )
+        )
+    }
+
+    private fun resetTiming(firstOfTurn: Boolean) {
+        this.firstOfTurn = firstOfTurn
+        startMs = nowMs()
+        firstMs = null
+        lastMs = null
+        outputTokens = null
+        usageFromProvider = false
+    }
+
+    private fun stampToken() {
+        val t = nowMs()
+        if (firstMs == null) firstMs = t
+        lastMs = t
+    }
+
+    private fun noteProviderUsage(usage: kotlinx.serialization.json.JsonObject?) {
+        val n = usage.numberLong("output") ?: return
+        if (n > 0) {
+            outputTokens = n
+            usageFromProvider = true
+        }
+    }
+
+    private fun currentSpeed(streaming: Boolean): GenerationSpeed? {
+        val tokens = when {
+            usageFromProvider -> outputTokens
+            else -> {
+                val chars = liveText.length + liveThinking.length
+                if (chars <= 0) null else (chars / 4L).coerceAtLeast(1L)
+            }
+        }
+        return computeGenerationSpeed(
+            startMs = startMs ?: firstMs ?: 0L,
+            firstMs = firstMs,
+            lastMs = lastMs,
+            outputTokens = tokens,
+            firstOfTurn = firstOfTurn,
+            estimated = !usageFromProvider,
+            streaming = streaming,
         )
     }
 
@@ -215,3 +315,8 @@ private fun kotlinx.serialization.json.JsonObject.boolOrNull(key: String): Boole
     (this[key] as? kotlinx.serialization.json.JsonPrimitive)?.content?.let {
         when (it) { "true" -> true; "false" -> false; else -> null }
     }
+
+private fun kotlinx.serialization.json.JsonObject?.numberLong(key: String): Long? {
+    val p = this?.get(key) as? kotlinx.serialization.json.JsonPrimitive ?: return null
+    return p.content.toLongOrNull() ?: p.content.toDoubleOrNull()?.toLong()
+}
