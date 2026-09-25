@@ -312,6 +312,42 @@
     .md a { color: var(--cyan); }
     .md table { border-collapse: collapse; font-size: 12px; margin-bottom: 6px; }
     .md th, .md td { border: 1px solid var(--outline); padding: 3px 6px; }
+    /* LaTeX: 不渲染，识别出来后给原始 LaTeX + 复制按钮 */
+    .formula {
+      margin: 6px 0;
+      border: 1px solid var(--outline);
+      border-radius: 8px;
+      background: rgba(136,136,136,.08);
+      overflow: hidden;
+    }
+    .formula-hdr {
+      display: flex; align-items: center; gap: 6px;
+      padding: 3px 8px;
+      border-bottom: 1px solid var(--outline);
+      font-size: 10px;
+      letter-spacing: .03em;
+      text-transform: uppercase;
+      color: var(--on-variant);
+      white-space: normal; /* .bubble 是 pre-wrap，这里必须显式收回，否则模板换行会变成空行 */
+    }
+    .formula-hdr .label { flex: 1; min-width: 0; }
+    .formula-copy { font-size: 12px; opacity: .7; cursor: pointer; user-select: none; }
+    .formula-copy:hover { opacity: 1; }
+    .formula-src {
+      margin: 0;
+      padding: 6px 9px;
+      overflow-x: auto;
+      white-space: pre;
+      font: 11px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace;
+      color: var(--on-surface);
+    }
+    .math-inline {
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: .95em;
+      background: rgba(136,136,136,.12);
+      padding: 0 3px;
+      border-radius: 3px;
+    }
     .empty { color: var(--on-variant); font-size: 13px; padding: 24px; text-align: center; }
   </style>
 </head>
@@ -324,6 +360,7 @@
       <label><input type="checkbox" id="expandAll"> 全部展开</label>
       <label><input type="checkbox" id="hideThinking"> 隐藏 thinking</label>
       <label><input type="checkbox" id="demoTools"> 插入 write / edit / 通用 tool 样例</label>
+      <label><input type="checkbox" id="demoMath" checked> 插入 LaTeX 公式样例（复制按钮）</label>
       <label><input type="checkbox" id="showSpeed" checked> 显示 TTFT / tok/s</label>
       <label><input type="checkbox" id="demoLive" checked> 插入流式气泡样例</label>
       <label><input type="checkbox" id="darkPhone"> 深色手机框（仅背景试看）</label>
@@ -343,6 +380,7 @@
         <li>bash 命令行始终显示全文（绿色，可换行）；折叠只收输出。</li>
         <li>read 到 <code>.md</code> 时，展开按 Markdown 渲染。</li>
         <li>助手气泡时间戳旁挂本条速度：<code>TTFT 1.2s · 38 tok/s</code>。首轮有 TTFT，工具后续写只留 tok/s。流式 tok/s 带 <code>~</code> 表示估算；等待首 token 时气泡只有光标、不写速度。</li>
+        <li>LaTeX <b>不渲染</b>：识别出 <code>$$…$$</code> / <code>\[…\]</code> 公式块，显示原始 LaTeX + 复制按钮（复制含定界符，可直接粘到别处）；行内 <code>$…$</code> 只加等宽底色，保留原文。</li>
       </ul>
       <p>刷新数据：<code>scp 'deb:~/.pi/agent/sessions/--root--/*.jsonl' tools/chat-preview/sessions/</code> 然后 <code>python3 tools/chat-preview/parse_sessions.py</code></p>
     </div>
@@ -395,13 +433,73 @@
         .replaceAll("<", "&lt;")
         .replaceAll(">", "&gt;");
     }
+    /**
+     * LaTeX 不做渲染：只识别出块级/行内公式。
+     * 块级公式保留原始 LaTeX 源码，配一个复制按钮，粘到别处去看。
+     */
+    function protectInlineMath(raw) {
+      const spans = [];
+      const text = raw.replace(/(^|[^\w$])(\$[^$\n]+?\$)(?=[\s，。！？、：；）】」》…—"'.,;:!?)*]|$)/g, (all, prefix, wrapped) => {
+        const body = wrapped.slice(1, -1);
+        // 明显是金额的（$10）不要当公式
+        if (/^\d/.test(body) && /^[\d\s.,%$€£]*$/.test(body)) return all;
+        spans.push(wrapped);
+        return `${prefix}\u0000MATH${spans.length - 1}\u0000`;
+      });
+      return { text, spans };
+    }
+    /** 公式块：原始 LaTeX + 复制按钮（复制内容含定界符，可直接粘到支持数学的 Markdown 编辑器） */
+    function formulaBlock(latex) {
+      // 单行拼接：.bubble 是 pre-wrap，多余换行会渲染成空白行
+      return `<div class="formula"><div class="formula-hdr"><span class="label">LaTeX</span><span class="formula-copy" title="复制 LaTeX">⧉</span></div><pre class="formula-src">${esc(latex)}</pre></div>`;
+    }
+    function mathDelim(open) {
+      if (open === "\\[" || /^\\\[.*\\\]$/.test(open)) {
+        return { open: "\\[", close: "\\]", wrap: (b) => `\\[${b}\\]`, unwrap: (m) => m.slice(2, -2) };
+      }
+      if (open === "$$" || /^\$\$[\s\S]+\$\$$/.test(open)) {
+        return { open: "$$", close: "$$", wrap: (b) => `$$${b}$$`, unwrap: (m) => m.slice(2, -2) };
+      }
+      return null;
+    }
+    function displayMathAt(lines, start) {
+      const line = lines[start].trim();
+      const delim = mathDelim(line);
+      if (!delim) return null;
+      // 整行只有开定界符 → 多行公式：必须先找到闭定界符
+      if (line === delim.open) {
+        let end = start + 1;
+        for (; end < lines.length; end++) {
+          const t = lines[end].trim();
+          if (t === delim.close) break;
+          // 出现空行或代码围栏说明已离开公式正文 → 视为未闭合，整段按普通文本处理
+          if (!t || t.startsWith("```")) return null;
+        }
+        if (end >= lines.length) return null; // 没有闭定界符，不当成公式
+        const inner = lines.slice(start + 1, end).join("\n");
+        if (!inner.trim()) return null; // 空公式
+        return { html: formulaBlock(delim.wrap(inner)), next: end + 1 };
+      }
+      // 同一行内成对 → 单行公式
+      const inner = delim.unwrap(line);
+      if (!inner.trim()) return null;
+      return { html: formulaBlock(delim.wrap(inner)), next: start + 1 };
+    }
     function inlineMd(src) {
-      let s = esc(src);
-      s = s.replace(/`([^`]+)`/g, "<code>$1</code>");
+      const codeSpans = [];
+      let raw = src.replace(/`([^`]+)`/g, (_, code) => {
+        codeSpans.push(code);
+        return `\u0000CODE${codeSpans.length - 1}\u0000`;
+      });
+      const protectedMath = protectInlineMath(raw);
+      let s = esc(protectedMath.text);
       s = s.replace(/\*\*([^*]+)\*\*/g, "<b>$1</b>");
       s = s.replace(/~~([^~]+)~~/g, "<s>$1</s>");
       s = s.replace(/(^|[^\w])\*([^*\s][^*]*)\*/g, "$1<i>$2</i>");
       s = s.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2">$1</a>');
+      // 行内公式也不渲染，只标记成等宽 + 底色，保留原始 $...$
+      s = s.replace(/\u0000MATH(\d+)\u0000/g, (_, index) => `<span class="math-inline">${esc(protectedMath.spans[Number(index)])}</span>`);
+      s = s.replace(/\u0000CODE(\d+)\u0000/g, (_, index) => `<code>${esc(codeSpans[Number(index)])}</code>`);
       return s;
     }
     function renderMarkdown(src) {
@@ -419,13 +517,18 @@
       while (i < lines.length) {
         const line = lines[i];
         const fence = line.match(/^```\s*(\S*)\s*$/);
+        const displayMath = displayMathAt(lines, i);
         const head = line.match(/^(#{1,6})\s+(.*)$/);
         const bullet = line.match(/^\s*[-*+]\s+(.*)$/);
         const ordered = line.match(/^\s*(\d{1,3})[.)]\s+(.*)$/);
         const quote = line.match(/^\s*>\s?(.*)$/);
         const rule = line.match(/^\s*([-*_])\1{2,}\s*$/);
         const table = parseTable(lines, i);
-        if (fence) {
+        if (displayMath) {
+          flushPara();
+          blocks.push(displayMath.html);
+          i = displayMath.next;
+        } else if (fence) {
           flushPara();
           const code = [];
           i++;
@@ -723,6 +826,7 @@
         [s.meta.model, s.meta.thinkingLevel && ("think " + s.meta.thinkingLevel), s.meta.cwd].filter(Boolean).join(" · ");
       const extras = [
         ...(document.getElementById("demoTools").checked ? DEMO_TOOLS : []),
+        ...(document.getElementById("demoMath").checked ? DEMO_MATH : []),
         ...(document.getElementById("demoLive").checked ? DEMO_LIVE : []),
       ];
       const items = withMockSpeed([...s.items, ...extras]);
@@ -756,6 +860,140 @@
       },
       { kind: "tool", key: "demo-generic", toolName: "grep", args: "vnstat", output: "/root/notes.md:3:vnstat -d", running: false, isError: false },
     ];
+    const DEMO_MATH = [
+      {
+        kind: "assistant",
+        key: "demo-latex",
+        text: String.raw`RMSNorm 是一种归一化层，用来控制向量的数值尺度，避免 Transformer 中隐藏状态的数值随着层数加深不断变大或变小。
+
+## 公式
+
+对隐藏向量 $x$：
+
+\[
+\mathrm{RMS}(x)
+=
+\sqrt{\frac{1}{d}\sum_{i=1}^{d}x_i^2+\epsilon}
+\]
+
+然后归一化：
+
+\[
+y_i
+=
+\frac{x_i}{\mathrm{RMS}(x)}g_i
+\]
+
+其中：
+
+- $d$：hidden size
+- $\epsilon$：防止除零的小常数
+- $g_i$：模型可学习的缩放参数
+
+代码中相当于：
+
+@@@go
+variance := mean(x²)
+rms := sqrt(variance + epsilon)
+y[i] = x[i] / rms * weight[i]
+@@@
+
+## 和 LayerNorm 的区别
+
+LayerNorm：
+
+\[
+\mu=\frac{1}{d}\sum x_i
+\]
+
+\[
+y_i=\frac{x_i-\mu}{\sqrt{\frac{1}{d}\sum(x_j-\mu)^2+\epsilon}}g_i+b_i
+\]
+
+RMSNorm：
+
+\[
+y_i=\frac{x_i}{\sqrt{\frac{1}{d}\sum x_j^2+\epsilon}}g_i
+\]
+
+RMSNorm 去掉了：
+
+1. 减去均值
+2. bias
+
+因此计算更简单，也更适合现代 decoder-only Transformer。
+
+## 一个简单例子
+
+假设：
+
+@@@text
+x = [3, 4]
+@@@
+
+RMS：
+
+\[
+\mathrm{RMS}(x)
+=
+\sqrt{\frac{3^2+4^2}{2}}
+=
+\sqrt{12.5}
+\]
+
+归一化后：
+
+@@@text
+x' ≈ [0.8485, 1.1314]
+@@@
+
+再乘以模型学习到的 __BT__weight__BT__：
+
+@@@text
+y = x' * g
+@@@
+
+## 它为什么有用
+
+RMSNorm 可以：
+
+- 稳定隐藏状态尺度
+- 让深层模型更容易训练
+- 减少激活值异常放大
+- 保持不同层之间的数值范围相对稳定
+- 略微减少计算和参数
+
+但它不会改变每个 token 向量内部的方向，只会沿着 RMS 进行缩放。
+
+## 在 gil 中的位置
+
+当前模型使用 Pre-Norm 结构：
+
+@@@text
+x = x + Attention(RMSNorm(x))
+x = x + MLP(RMSNorm(x))
+@@@
+
+所以每个 Transformer Block 中有两次 RMSNorm：
+
+1. Attention 前的归一化
+2. MLP 前的归一化
+
+最后还有一次：
+
+@@@text
+RMSNorm(x)
+@@@
+
+用于 LM Head 之前的最终归一化。`.replaceAll("@@@", "```").replaceAll("__BT__", "`"),
+        thinking: null,
+        streaming: false,
+        time: "",
+        firstOfTurn: false,
+        ttftMs: null,
+        toksPerSec: null,
+      },
+    ];
     const DEMO_LIVE = [
       {
         kind: "assistant",
@@ -784,6 +1022,7 @@
     document.getElementById("expandAll").addEventListener("change", render);
     document.getElementById("hideThinking").addEventListener("change", render);
     document.getElementById("demoTools").addEventListener("change", render);
+    document.getElementById("demoMath").addEventListener("change", render);
     document.getElementById("showSpeed").addEventListener("change", render);
     document.getElementById("demoLive").addEventListener("change", render);
     document.getElementById("darkPhone").addEventListener("change", (e) => {

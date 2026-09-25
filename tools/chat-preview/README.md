@@ -33,6 +33,8 @@
 - thinking 预览取首行；tool / bash 输出预览取末行
 - bash 命令行始终显示全文（绿色 `$ cmd`，可换行）；折叠只收输出
 - read 到 `.md` / `.markdown` / `.mdx` 时，展开按 Markdown 渲染
+- LaTeX **不做渲染**：只识别 `$$...$$` / `\[...\]` 公式块，显示原始 LaTeX 源码 + 复制按钮（复制含定界符，可直接粘到支持数学的 Markdown 编辑器）；行内 `$...$` 只加等宽底色保留原文
+- 左侧可开「插入 LaTeX 公式样例（复制按钮）」，用 RMSNorm 样例查看效果
 - 助手气泡 wrap-content，无 320dp 上限
 - Copy 只是占位，不写剪贴板
 - 助手气泡时间戳旁 mock TTFT / tok/s（首轮有 TTFT，工具后续写只有 tok/s）；左侧可关「显示 TTFT / tok/s」，可关「插入流式气泡样例」

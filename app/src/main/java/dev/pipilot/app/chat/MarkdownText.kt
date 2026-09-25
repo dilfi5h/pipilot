@@ -56,6 +56,8 @@ private sealed interface MdBlock {
     data class ListItem(val marker: String, val text: String) : MdBlock
     data class Quote(val text: String) : MdBlock
     data class Table(val headers: List<String>, val rows: List<List<String>>) : MdBlock
+    /** LaTeX display math, kept as source text (not rendered); [latex] includes its delimiters. */
+    data class Formula(val latex: String) : MdBlock
     data object Rule : MdBlock
 }
 
@@ -84,7 +86,13 @@ private fun parseBlocks(src: String): List<MdBlock> {
         val quoteM = quoteRegex.matchEntire(line)
         val ruleM = ruleRegex.matchEntire(line)
         val table = parseTable(lines, i)
+        val formula = displayMathAt(lines, i)
         when {
+            formula != null -> {
+                flushPara()
+                blocks.add(formula.first)
+                i = formula.second
+            }
             fenceM != null -> {
                 flushPara()
                 val lang = fenceM.groupValues[1].takeIf { it.isNotBlank() }
@@ -127,6 +135,63 @@ private fun parseBlocks(src: String): List<MdBlock> {
 internal fun markdownContainsTable(src: String): Boolean =
     parseBlocks(src).any { it is MdBlock.Table }
 
+/**
+ * Test hook: LaTeX formula blocks parsed out of [src], source text with delimiters included.
+ */
+internal fun markdownFormulaBlocks(src: String): List<String> =
+    parseBlocks(src).filterIsInstance<MdBlock.Formula>().map { it.latex }
+
+/** Test hook: inline `$...$` runs kept verbatim (delimiters included). */
+internal fun markdownInlineMathRuns(src: String): List<String> =
+    parseInline(src).filter { it.second.math }.map { it.first }
+
+/** Test hook: block kinds in order (e.g. `listOf("Para", "Formula", "Code")`). */
+internal fun markdownBlockKinds(src: String): List<String> =
+    parseBlocks(src).map { it::class.simpleName ?: "?" }
+
+// ---------- LaTeX detection (no rendering, copy the source) ----------
+
+private data class MathDelim(val open: String, val close: String) {
+    fun wrap(body: String) = open + body + close
+    fun unwrap(single: String) = single.substring(2, single.length - 2)
+}
+
+private fun mathDelim(trimmed: String): MathDelim? = when {
+    trimmed == "\\[" || (trimmed.length > 4 && trimmed.startsWith("\\[") && trimmed.endsWith("\\]")) ->
+        MathDelim("\\[", "\\]")
+    trimmed == "$$" || (trimmed.length > 4 && trimmed.startsWith("$$") && trimmed.endsWith("$$")) ->
+        MathDelim("$$", "$$")
+    else -> null
+}
+
+/**
+ * Display math at [start], or null when this line is not a formula.
+ *
+ * Deliberately conservative: an unclosed delimiter (no closing line, a blank line, or a
+ * code fence in between) falls back to plain text, so a stray `$$` can never swallow the
+ * rest of the message or break a fenced code block.
+ */
+private fun displayMathAt(lines: List<String>, start: Int): Pair<MdBlock.Formula, Int>? {
+    val line = lines[start].trim()
+    val delim = mathDelim(line) ?: return null
+    if (line == delim.open) {
+        var end = start + 1
+        while (end < lines.size) {
+            val t = lines[end].trim()
+            if (t == delim.close) break
+            if (t.isEmpty() || t.startsWith("```")) return null
+            end++
+        }
+        if (end >= lines.size) return null
+        val inner = lines.subList(start + 1, end).joinToString("\n")
+        if (inner.isBlank()) return null
+        return MdBlock.Formula(delim.wrap(inner)) to end + 1
+    }
+    val inner = delim.unwrap(line)
+    if (inner.isBlank()) return null
+    return MdBlock.Formula(delim.wrap(inner)) to start + 1
+}
+
 private val tableSepRegex = Regex("""^\s*\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?\s*$""")
 
 private fun looksLikeTableRow(line: String): Boolean {
@@ -160,7 +225,13 @@ private data class InlineStyle(
     val code: Boolean = false,
     val strike: Boolean = false,
     val link: Boolean = false,
+    /** Inline LaTeX `$...$`: kept verbatim, only styled. */
+    val math: Boolean = false,
 )
+
+/** Boundary chars that may follow inline math (mirrors the HTML preview's punctuation set). */
+private fun isMathBoundary(c: Char?): Boolean =
+    c == null || c.isWhitespace() || c in "，。！？、：；）】」》…—\"'.,;:!?)*"
 
 /** Split into (text, style) runs; unknown markers are kept as-is. */
 private fun parseInline(text: String, base: InlineStyle = InlineStyle()): List<Pair<String, InlineStyle>> {
@@ -222,6 +293,20 @@ private fun parseInline(text: String, base: InlineStyle = InlineStyle()): List<P
                     i = close + 1
                 } else { lit.append(c); i++ }
             }
+            c == '$' -> {
+                val close = text.indexOf('$', i + 1)
+                val body = if (close > i + 1) text.substring(i + 1, close) else null
+                val before = if (i == 0) null else text[i - 1]
+                val boundaryBefore = before == null || !(before.isLetterOrDigit() || before == '_' || before == '$')
+                // 明显是金额的（$10）不要当公式
+                val isCurrency = body != null && body.first().isDigit() &&
+                    body.all { it.isDigit() || it.isWhitespace() || it in ".,%$€£" }
+                if (body != null && !body.contains('\n') && boundaryBefore && isMathBoundary(text.getOrNull(close + 1)) && !isCurrency) {
+                    flush()
+                    runs.add(text.substring(i, close + 1) to base.copy(math = true))
+                    i = close + 1
+                } else { lit.append(c); i++ }
+            }
             c == '[' -> {
                 val closeB = text.indexOf("](", i + 1)
                 val closeP = if (closeB > i) text.indexOf(')', closeB + 2) else -1
@@ -250,8 +335,8 @@ private fun inlineText(text: String): AnnotatedString {
                         fontWeight = if (s.bold) FontWeight.Bold else null,
                         fontStyle = if (s.italic) FontStyle.Italic else null,
                         textDecoration = if (s.strike) TextDecoration.LineThrough else null,
-                        fontFamily = if (s.code) FontFamily.Monospace else null,
-                        background = if (s.code) codeBg else Color.Unspecified,
+                        fontFamily = if (s.code || s.math) FontFamily.Monospace else null,
+                        background = if (s.code || s.math) codeBg else Color.Unspecified,
                         color = if (s.link) linkColor else Color.Unspecified,
                     )
                 )
@@ -412,6 +497,57 @@ fun MarkdownText(markdown: String, modifier: Modifier = Modifier) {
                         .background(MaterialTheme.colorScheme.outlineVariant)
                 )
                 is MdBlock.Table -> MdTable(b)
+                is MdBlock.Formula -> FormulaBlock(b)
+            }
+        }
+    }
+}
+
+/**
+ * LaTeX block: not rendered. Shows the source plus a copy button so it can be pasted
+ * into a math-capable viewer. Header stays one line tall — no hint text, no extra padding.
+ */
+@Composable
+private fun FormulaBlock(block: MdBlock.Formula) {
+    Surface(
+        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f),
+        shape = RoundedCornerShape(8.dp),
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Column {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(start = 8.dp, end = 2.dp, top = 1.dp, bottom = 1.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    "LaTeX",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.weight(1f),
+                )
+                CopyItemButton(
+                    text = block.latex,
+                    contentDescription = "Copy LaTeX",
+                )
+            }
+            Surface(
+                color = Color(0xFF1E1E1E),
+                shape = RoundedCornerShape(bottomStart = 8.dp, bottomEnd = 8.dp),
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Text(
+                    block.latex,
+                    style = MaterialTheme.typography.bodySmall,
+                    fontFamily = FontFamily.Monospace,
+                    fontSize = 11.sp,
+                    color = CodeDefault,
+                    softWrap = false,
+                    modifier = Modifier
+                        .horizontalScroll(rememberScrollState())
+                        .padding(horizontal = 10.dp, vertical = 8.dp),
+                )
             }
         }
     }

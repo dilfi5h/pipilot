@@ -123,6 +123,15 @@ Clients must assemble by `contentIndex`. `StreamReducer` state machine:
   removed/added text. This is display data only: the arguments come from the RPC
   tool call, not from the tool result. `toolcall_end.toolCall` is preferred when
   present, while streamed `toolcall_delta` fragments are used as a fallback.
+- **LaTeX is not rendered.** `MarkdownText` only *detects* it: `$$…$$` / `\[…\]`
+  become a compact `FormulaBlock` (one-line `LaTeX` header + copy button + the raw
+  source in a code-styled, horizontally scrollable area); inline `$…$` keeps its
+  delimiters and only gets a monospace background. Copying yields the source *with*
+  delimiters so it can be pasted straight into a math-capable viewer. Detection is
+  deliberately conservative — an unclosed delimiter (no closing line, a blank line,
+  or a code fence in between) falls back to plain text, so a stray `$$` can never
+  swallow the rest of the message or break a fenced block. Full KaTeX/MathJax
+  rendering was rejected as too heavy for a chat client.
 
 Generation speed is **client-timed**, not a pi RPC field. `StreamReducer` records
 local arrival times: `t_start` is `agent_start` for the first LLM call of a turn

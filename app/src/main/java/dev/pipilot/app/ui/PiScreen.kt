@@ -115,6 +115,7 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import dev.pipilot.app.chat.ChatCollapse
 import dev.pipilot.app.chat.ChatItem
+import dev.pipilot.app.chat.CopyItemButton
 import dev.pipilot.app.chat.MarkdownText
 import dev.pipilot.app.chat.ToolFamily
 import dev.pipilot.app.chat.copyText
@@ -614,24 +615,6 @@ private fun ChatItem.textLength(): Int = when (this) {
     is ChatItem.BashOutput -> output.length
     is ChatItem.SystemNote -> text.length
     else -> 0
-}
-
-@Composable
-private fun CopyItemButton(text: String, contentColor: Color = MaterialTheme.colorScheme.onSurfaceVariant) {
-    val clipboard = LocalClipboardManager.current
-    DisableSelection {
-        IconButton(
-            onClick = { clipboard.setText(AnnotatedString(text)) },
-            modifier = Modifier.size(28.dp),
-        ) {
-            Icon(
-                Icons.Filled.ContentCopy,
-                contentDescription = "Copy message",
-                modifier = Modifier.size(14.dp),
-                tint = contentColor,
-            )
-        }
-    }
 }
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
