@@ -477,7 +477,11 @@ class PiViewModel(app: Application) : AndroidViewModel(app) {
                     if (idx >= 0) {
                         val prev = out[idx] as ChatItem.ToolCard
                         // Take the latest output; keep the first args (update events omit args)
-                        out[idx] = item.copy(argsSummary = item.argsSummary ?: prev.argsSummary)
+                        out[idx] = item.copy(
+                            toolName = item.toolName.takeUnless { it == "?" || it.isBlank() } ?: prev.toolName,
+                            argsSummary = item.argsSummary ?: prev.argsSummary,
+                            argsJson = item.argsJson ?: prev.argsJson,
+                        )
                     } else {
                         out.add(item)
                     }
@@ -881,6 +885,7 @@ class PiViewModel(app: Application) : AndroidViewModel(app) {
                                 null,
                                 running = false,
                                 isError = false,
+                                argsJson = tc.argumentsJson,
                             ),
                         )
                     }

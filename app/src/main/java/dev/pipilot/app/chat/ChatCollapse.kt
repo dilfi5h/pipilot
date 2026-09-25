@@ -1,6 +1,7 @@
 package dev.pipilot.app.chat
 
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.contentOrNull
@@ -48,6 +49,36 @@ object ChatCollapse {
 
     fun isExpanded(active: Boolean, userExpanded: Boolean?): Boolean =
         userExpanded ?: active
+
+    /** Full content argument used by the built-in write tool. */
+    fun writeContent(raw: String?): String? =
+        stringField(parseObject(raw), "content", "text")
+
+    /** Old/new pairs used by pi's edit tool, including empty old/new sides. */
+    fun editChanges(raw: String?): List<Pair<String, String>> {
+        val obj = parseObject(raw) ?: return emptyList()
+        val edits = (obj["edits"] as? JsonArray)
+            ?.mapNotNull { it as? JsonObject }
+            ?: listOf(obj)
+        return edits.mapNotNull { edit ->
+            val oldText = stringField(edit, "oldText", "old_string")
+            val newText = stringField(edit, "newText", "new_string")
+            if (oldText == null && newText == null) null else (oldText ?: "") to (newText ?: "")
+        }
+    }
+
+    private fun parseObject(raw: String?): JsonObject? {
+        if (raw.isNullOrBlank()) return null
+        return runCatching { argsJson.parseToJsonElement(raw.trim()) as? JsonObject }.getOrNull()
+    }
+
+    private fun stringField(obj: JsonObject?, vararg keys: String): String? {
+        if (obj == null) return null
+        for (key in keys) {
+            (obj[key] as? JsonPrimitive)?.contentOrNull?.let { return it }
+        }
+        return null
+    }
 
     fun thinkingPreview(text: String): String =
         clipPreview(firstNonBlankLine(text), fromEnd = false)

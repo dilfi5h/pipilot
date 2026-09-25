@@ -74,6 +74,26 @@ class ChatCollapseTest {
     }
 
     @Test
+    fun toolArgumentsExposeWriteContentAndEditPairs() {
+        assertEquals(
+            "hello\nworld",
+            ChatCollapse.writeContent("""{"path":"/tmp/a","content":"hello\nworld"}"""),
+        )
+        assertEquals(
+            listOf("before" to "after", "remove" to ""),
+            ChatCollapse.editChanges(
+                """{"path":"/tmp/a","edits":[{"oldText":"before","newText":"after"},{"oldText":"remove","newText":""}]}""",
+            ),
+        )
+        assertEquals(null, ChatCollapse.writeContent("""{"path":"/tmp/a"}"""))
+        assertEquals("", ChatCollapse.writeContent("""{"path":"/tmp/a","content":""}"""))
+        val longText = "x".repeat(ChatCollapse.EXPANDED_MAX_CHARS + 128)
+        assertEquals(longText, ChatCollapse.writeContent("""{"content":${'"'}$longText${'"'}}"""))
+        assertEquals(listOf(longText to longText), ChatCollapse.editChanges("""{"edits":[{"oldText":${'"'}$longText${'"'},"newText":${'"'}$longText${'"'}}]}"""))
+        assertEquals(emptyList<Pair<String, String>>(), ChatCollapse.editChanges("not json"))
+    }
+
+    @Test
     fun markdownPathLooksAtExtensionOnly() {
         assertTrue(ChatCollapse.isMarkdownPath("/root/docs/README.md"))
         assertTrue(ChatCollapse.isMarkdownPath("notes.markdown"))

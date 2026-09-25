@@ -140,6 +140,8 @@ data class DeltaEvent(
     val toolName: String?,
     val toolCallId: String?,
     val content: String?, // text_end carries the full text
+    /** toolcall_end carries the authoritative complete toolCall object. */
+    val toolCall: JsonObject? = null,
 )
 
 data class PiEvent(
@@ -157,6 +159,7 @@ data class PiEvent(
                 toolName = d.str("toolName"),
                 toolCallId = d.str("id"),
                 content = d.str("content"),
+                toolCall = d["toolCall"] as? JsonObject,
             )
         }
 

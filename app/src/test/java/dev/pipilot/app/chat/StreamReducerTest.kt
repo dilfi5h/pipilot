@@ -55,6 +55,29 @@ class StreamReducerTest {
     }
 
     @Test
+    fun toolCallEndRetainsFullWriteArguments() {
+        val items = collect(
+            """{"type":"message_update","assistantMessageEvent":{"type":"toolcall_start","id":"call-write","toolName":"write"}}""",
+            """{"type":"message_update","assistantMessageEvent":{"type":"toolcall_end","id":"call-write","toolCall":{"id":"call-write","name":"write","arguments":{"path":"/tmp/a.txt","content":"hello"}}}}""",
+        )
+        val card = items.filterIsInstance<ChatItem.ToolCard>().last()
+        assertEquals("/tmp/a.txt", card.argsSummary)
+        assertEquals("hello", ChatCollapse.writeContent(card.argsJson))
+    }
+
+    @Test
+    fun streamedToolArgumentsSurviveWithoutToolCallEndObject() {
+        val items = collect(
+            """{"type":"message_update","assistantMessageEvent":{"type":"toolcall_start","id":"call-edit","toolName":"edit"}}""",
+            """{"type":"message_update","assistantMessageEvent":{"type":"toolcall_delta","id":"call-edit","delta":"{\"edits\":[{"}}""",
+            """{"type":"message_update","assistantMessageEvent":{"type":"toolcall_delta","id":"call-edit","delta":"\"oldText\":\"before\",\"newText\":\"after\"}]}"}}""",
+            """{"type":"message_update","assistantMessageEvent":{"type":"toolcall_end","id":"call-edit"}}""",
+        )
+        val card = items.filterIsInstance<ChatItem.ToolCard>().last()
+        assertEquals(listOf("before" to "after"), ChatCollapse.editChanges(card.argsJson))
+    }
+
+    @Test
     fun bashUpdatesUseCommandIdAsKey() {
         val items = collect(
             """{"type":"bash_execution_update","id":"req-1","delta":"a"}""",

@@ -121,6 +121,8 @@ sealed interface ChatItem {
         val output: String?,
         val running: Boolean,
         val isError: Boolean,
+        /** Full tool argument JSON, retained for write/edit content and diffs. */
+        val argsJson: String? = null,
         override val key: String = "tool-$toolCallId",
     ) : ChatItem
 
@@ -143,6 +145,12 @@ fun ChatItem.copyText(): String? = when (this) {
     is ChatItem.ToolCard -> buildString {
         append(toolName)
         argsSummary?.takeIf { it.isNotBlank() }?.let { append('\n').append(it) }
+        when (toolName.trim().lowercase()) {
+            "write" -> ChatCollapse.writeContent(argsJson)?.let { append("\n\n").append(it) }
+            "edit" -> ChatCollapse.editChanges(argsJson).forEach { (oldText, newText) ->
+                append("\n\n− ").append(oldText).append("\n+ ").append(newText)
+            }
+        }
         output?.takeIf { it.isNotBlank() }?.let { append('\n').append(it) }
     }.takeIf { it.isNotBlank() }
     is ChatItem.BashOutput -> buildString {

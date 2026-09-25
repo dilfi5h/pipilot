@@ -64,6 +64,6 @@ gradle assembleRelease
 
 - 不要提交：`keystore.properties`、`*.keystore`、`tools/chat-preview/sessions/`、`fixtures.js`、本地 APK。
 - 提交信息写清做了什么，不要空的 `update`。
-- **任何情况下不要自行打 tag。** 只有用户明确说「打 tag」时才打。日常真机包用第 4 步的本地 APK。
+- **任何情况下不要自行打 tag 或者修改版本号** 只有用户明确说「打 tag」时才打。日常真机包用第 4 步的本地 APK。
 
 推送被拒或 CI 挂了：按报错回到第 3 / 4 步，不要强推。

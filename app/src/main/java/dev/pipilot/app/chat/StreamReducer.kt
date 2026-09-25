@@ -114,18 +114,37 @@ class StreamReducer(
                         emitLive(sink)
                     }
                     "toolcall_end" -> {
-                        val id = d.toolCallId ?: return
-                        liveToolCalls[id]?.let { live ->
-                            emitToolCard(sink, live.id, live.name, live.args.toString(), output = null, running = true)
-                        }
+                        val id = d.toolCallId ?: d.toolCall?.str("id") ?: return
+                        val live = liveToolCalls[id]
+                        val toolCall = d.toolCall
+                        val name = toolCall?.str("name") ?: live?.name ?: "?"
+                        val argsJson = toolCall?.get("arguments")?.toString()
+                            ?: live?.args?.toString()?.takeIf { it.isNotBlank() }
+                        emitToolCard(
+                            sink = sink,
+                            id = id,
+                            name = name,
+                            argsSummary = extractArgsText(parseArgsElement(argsJson)),
+                            argsJson = argsJson,
+                            output = null,
+                            running = true,
+                        )
                     }
                 }
             }
 
             "tool_execution_start" -> {
                 val id = event.toolCallId ?: return
-                val args = extractArgsText(event.raw["args"])
-                emitToolCard(sink, id, event.toolName ?: "?", args, output = null, running = true)
+                val argsJson = event.raw["args"]?.toString()
+                emitToolCard(
+                    sink = sink,
+                    id = id,
+                    name = event.toolName ?: "?",
+                    argsSummary = extractArgsText(event.raw["args"]),
+                    argsJson = argsJson,
+                    output = null,
+                    running = true,
+                )
                 // Assistant text was already committed on toolcall_start; clear live text but do not emit an empty bubble
                 liveText = StringBuilder()
                 liveThinking = StringBuilder()
@@ -134,12 +153,29 @@ class StreamReducer(
             "tool_execution_update" -> {
                 val id = event.toolCallId ?: return
                 val partial = event.partialToolText ?: return
-                emitToolCard(sink, id, event.toolName ?: "?", null, output = partial, running = true)
+                emitToolCard(
+                    sink = sink,
+                    id = id,
+                    name = event.toolName ?: "?",
+                    argsSummary = null,
+                    argsJson = event.raw["args"]?.toString(),
+                    output = partial,
+                    running = true,
+                )
             }
 
             "tool_execution_end" -> {
                 val id = event.toolCallId ?: return
-                emitToolCard(sink, id, event.toolName ?: "?", null, output = event.resultToolText ?: "", running = false, isError = event.isError)
+                emitToolCard(
+                    sink = sink,
+                    id = id,
+                    name = event.toolName ?: "?",
+                    argsSummary = null,
+                    argsJson = event.raw["args"]?.toString(),
+                    output = event.resultToolText ?: "",
+                    running = false,
+                    isError = event.isError,
+                )
             }
 
             "message_end" -> {
@@ -222,11 +258,22 @@ class StreamReducer(
         id: String,
         name: String,
         argsSummary: String?,
+        argsJson: String? = null,
         output: String?,
         running: Boolean,
         isError: Boolean = false,
     ) {
-        sink(ChatItem.ToolCard(toolCallId = id, toolName = name, argsSummary = argsSummary, output = output, running = running, isError = isError))
+        sink(
+            ChatItem.ToolCard(
+                toolCallId = id,
+                toolName = name,
+                argsSummary = argsSummary,
+                output = output,
+                running = running,
+                isError = isError,
+                argsJson = argsJson,
+            ),
+        )
     }
 
     private fun flushAssistantFromMessage(msg: ChatMessage, sink: (ChatItem) -> Unit) {
@@ -293,6 +340,9 @@ class StreamReducer(
             streaming = streaming,
         )
     }
+
+    private fun parseArgsElement(raw: String?): kotlinx.serialization.json.JsonElement? =
+        raw?.let { runCatching { kotlinx.serialization.json.Json.parseToJsonElement(it) }.getOrNull() }
 
     /** Human-readable summary from an args JsonElement. */
     fun extractArgsText(args: kotlinx.serialization.json.JsonElement?): String? {

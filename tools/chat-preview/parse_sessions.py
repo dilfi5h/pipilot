@@ -154,7 +154,13 @@ def parse_file(path: Path) -> dict:
                     }
                 )
             for tc in tool_calls:
-                args = extract_args(tc.get("arguments"))
+                raw_args = tc.get("arguments")
+                args = extract_args(raw_args)
+                args_json = (
+                    json.dumps(raw_args, ensure_ascii=False)
+                    if isinstance(raw_args, (dict, list))
+                    else None
+                )
                 items.append(
                     {
                         "kind": "tool",
@@ -162,6 +168,7 @@ def parse_file(path: Path) -> dict:
                         "toolCallId": tc.get("id") or "",
                         "toolName": tc.get("name") or "?",
                         "args": args,
+                        "argsJson": args_json,
                         "output": None,
                         "running": False,
                         "isError": False,

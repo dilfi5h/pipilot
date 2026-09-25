@@ -243,6 +243,53 @@
       font-family: inherit; font-size: 12px; color: var(--on-variant);
     }
     .thinking .name { font-weight: 500; font-size: 11px; color: var(--on-variant); font-style: italic; }
+    .args {
+      margin-top: 8px;
+      border: 1px solid color-mix(in srgb, var(--on-variant) 24%, transparent);
+      border-radius: 7px;
+      overflow: hidden;
+    }
+    .args-label {
+      padding: 5px 8px;
+      font-size: 10px;
+      font-weight: 650;
+      letter-spacing: .03em;
+      text-transform: uppercase;
+      color: var(--on-variant);
+      background: color-mix(in srgb, var(--on-variant) 8%, transparent);
+    }
+    .args-code {
+      margin: 0;
+      padding: 8px;
+      max-height: 360px;
+      overflow: auto;
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+      word-break: break-word;
+      font: 11px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace;
+      color: var(--on-surface);
+    }
+    .diff-group + .diff-group { border-top: 1px solid color-mix(in srgb, var(--on-variant) 20%, transparent); }
+    .diff-pair { display: grid; grid-template-columns: 1fr 1fr; }
+    .diff-side { min-width: 0; }
+    .diff-side + .diff-side { border-left: 1px solid color-mix(in srgb, var(--on-variant) 20%, transparent); }
+    .diff-heading {
+      padding: 4px 7px;
+      font: 10px/1.2 ui-monospace, SFMono-Regular, Menlo, monospace;
+      color: var(--on-variant);
+      background: color-mix(in srgb, var(--on-variant) 6%, transparent);
+    }
+    .diff-text {
+      min-height: 26px;
+      padding: 6px 7px;
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+      word-break: break-word;
+      font: 11px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace;
+    }
+    .diff-old { background: color-mix(in srgb, #B3261E 13%, transparent); }
+    .diff-new { background: color-mix(in srgb, #43A047 15%, transparent); }
+    .result-label { color: var(--on-variant); }
     .badge { font-size: 12px; }
     .md p { margin: 0 0 6px; }
     .md p:last-child { margin-bottom: 0; }
@@ -435,6 +482,53 @@
       return /\.(md|markdown|mdx)$/i.test(path || "");
     }
 
+    function toolArgs(it) {
+      if (it.argsJson && typeof it.argsJson === "object") return it.argsJson;
+      if (typeof it.argsJson === "string") {
+        try { return JSON.parse(it.argsJson); } catch (_) { return null; }
+      }
+      return null;
+    }
+    function argText(args, ...keys) {
+      for (const key of keys) {
+        if (typeof args?.[key] === "string") return args[key];
+      }
+      return "";
+    }
+    function renderDiffPair(oldText, newText) {
+      const oldValue = oldText || "∅";
+      const newValue = newText || "∅";
+      return `<div class="diff-pair">
+        <div class="diff-side diff-old"><div class="diff-heading">− removed</div><div class="diff-text">${esc(oldValue)}</div></div>
+        <div class="diff-side diff-new"><div class="diff-heading">+ added</div><div class="diff-text">${esc(newValue)}</div></div>
+      </div>`;
+    }
+    function renderToolArgs(it) {
+      const args = toolArgs(it);
+      if (!args || typeof args !== "object" || Array.isArray(args)) return "";
+      const name = (it.toolName || "").toLowerCase();
+      if (name === "write") {
+        const content = argText(args, "content", "text");
+        if (!content) return "";
+        return `<div class="args"><div class="args-label">new content</div><pre class="args-code">${esc(expandedBody(content, false))}</pre></div>`;
+      }
+      if (name === "edit") {
+        const edits = Array.isArray(args.edits) ? args.edits : [args];
+        const pairs = edits.map((edit, index) => {
+          const oldText = argText(edit, "oldText", "old_string");
+          const newText = argText(edit, "newText", "new_string");
+          if (!oldText && !newText) return "";
+          return `<div class="diff-group"><div class="args-label">edit ${index + 1}</div>${renderDiffPair(oldText, newText)}</div>`;
+        }).filter(Boolean);
+        return pairs.length ? `<div class="args">${pairs.join("")}</div>` : "";
+      }
+      return "";
+    }
+    function renderToolOutput(it, fromEnd = true) {
+      if (!it.output) return "";
+      return `<div class="args"><div class="args-label result-label">result</div><pre class="args-code">${esc(expandedBody(it.output, fromEnd))}</pre></div>`;
+    }
+
     /** Format a per-bubble speed footnote: "TTFT 1.2s · 38 tok/s". */
     function formatSpeed(it) {
       if (!document.getElementById("showSpeed").checked) return "";
@@ -588,13 +682,16 @@
         const md = name === "read" && isMarkdownPath(path) && it.output;
         const previewSrc = it.output ? lastNonBlank(it.output) : firstNonBlank(path);
         const familyClass = fileFamily ? name : "tool";
+        const argsHtml = renderToolArgs(it);
+        const outputHtml = md ? renderMarkdown(expandedBody(it.output, false)) : renderToolOutput(it, true);
+        const plainBody = [path && !fileFamily ? path : "", it.output ? expandedBody(it.output, true) : ""].filter(Boolean).join("\n\n");
         return collapseBlock({
           key: it.key,
           title: it.toolName || "tool",
           path: path && fileFamily ? path : "",
           preview: clipPreview(previewSrc, !!it.output),
-          body: md ? "" : [path && !fileFamily ? path : "", it.output ? expandedBody(it.output, true) : ""].filter(Boolean).join("\n\n"),
-          bodyHtml: md ? renderMarkdown(expandedBody(it.output, false)) : "",
+          body: argsHtml || outputHtml ? "" : plainBody,
+          bodyHtml: [argsHtml, outputHtml].filter(Boolean).join(""),
           extraClass: familyClass,
           nameClass: "tool-name",
           leading: `<span>${fileFamily ? "📄" : "🛠"}</span>`,
@@ -647,8 +744,16 @@
     }
 
     const DEMO_TOOLS = [
-      { kind: "tool", key: "demo-write", toolName: "write", args: "/root/notes.md", output: "# Hello\n\nWrote this file.", running: false, isError: false },
-      { kind: "tool", key: "demo-edit", toolName: "edit", args: "/etc/default/locale", output: "replaced LANG line", running: false, isError: false },
+      {
+        kind: "tool", key: "demo-write", toolName: "write", args: "/root/notes.md",
+        argsJson: { path: "/root/notes.md", content: "# Hello\n\nThis is the exact content sent to write." },
+        output: "Wrote /root/notes.md", running: false, isError: false,
+      },
+      {
+        kind: "tool", key: "demo-edit", toolName: "edit", args: "/etc/default/locale",
+        argsJson: { path: "/etc/default/locale", edits: [{ oldText: "LANG=en_US.UTF-8", newText: "LANG=zh_CN.UTF-8" }] },
+        output: "Updated /etc/default/locale", running: false, isError: false,
+      },
       { kind: "tool", key: "demo-generic", toolName: "grep", args: "vnstat", output: "/root/notes.md:3:vnstat -d", running: false, isError: false },
     ];
     const DEMO_LIVE = [

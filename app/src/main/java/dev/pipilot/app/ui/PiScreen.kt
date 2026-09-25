@@ -841,6 +841,99 @@ private fun BlinkingCursor() {
 }
 
 @Composable
+private fun ToolArgumentBox(label: String, body: String, fromEnd: Boolean = false, truncate: Boolean = false) {
+    Surface(
+        color = MaterialTheme.colorScheme.surface.copy(alpha = 0.52f),
+        shape = RoundedCornerShape(7.dp),
+        modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
+    ) {
+        Column {
+            Text(
+                label,
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(horizontal = 8.dp, vertical = 5.dp),
+            )
+            Text(
+                if (truncate) ChatCollapse.expandedBody(body, fromEnd = fromEnd) else body.ifEmpty { "∅" },
+                style = MaterialTheme.typography.bodySmall,
+                fontFamily = FontFamily.Monospace,
+                fontSize = 11.sp,
+                color = MaterialTheme.colorScheme.onSurface,
+                modifier = Modifier
+                    .padding(horizontal = 8.dp, vertical = 8.dp)
+                    .heightIn(max = 360.dp)
+                    .verticalScroll(rememberScrollState()),
+            )
+        }
+    }
+}
+
+@Composable
+private fun ToolEditChanges(changes: List<Pair<String, String>>) {
+    if (changes.isEmpty()) return
+    Column(Modifier.fillMaxWidth().padding(top = 8.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        Text(
+            "edits",
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        changes.forEachIndexed { index, (oldText, newText) ->
+            Column(
+                modifier = Modifier.fillMaxWidth(),
+                verticalArrangement = Arrangement.spacedBy(4.dp),
+            ) {
+                Text(
+                    "edit ${index + 1}",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                    ToolDiffSide(
+                        label = "− removed",
+                        text = oldText,
+                        color = MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.45f),
+                        modifier = Modifier.weight(1f),
+                    )
+                    ToolDiffSide(
+                        label = "+ added",
+                        text = newText,
+                        color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.45f),
+                        modifier = Modifier.weight(1f),
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun ToolDiffSide(label: String, text: String, color: Color, modifier: Modifier = Modifier) {
+    Surface(color = color, shape = RoundedCornerShape(6.dp), modifier = modifier) {
+        Column {
+            Text(
+                label,
+                style = MaterialTheme.typography.labelSmall,
+                fontFamily = FontFamily.Monospace,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(horizontal = 7.dp, vertical = 4.dp),
+            )
+            Text(
+                text.ifEmpty { "∅" },
+                style = MaterialTheme.typography.bodySmall,
+                fontFamily = FontFamily.Monospace,
+                fontSize = 11.sp,
+                color = MaterialTheme.colorScheme.onSurface,
+                modifier = Modifier
+                    .padding(horizontal = 7.dp, vertical = 6.dp)
+                    .heightIn(max = 240.dp)
+                    .verticalScroll(rememberScrollState()),
+            )
+        }
+    }
+}
+
+@Composable
 private fun ToolCard(item: ChatItem.ToolCard) {
     val family = ChatCollapse.toolFamily(item.toolName)
     if (family == ToolFamily.Bash) {
@@ -900,16 +993,20 @@ private fun ToolCard(item: ChatItem.ToolCard) {
                 }
                 if (expanded) {
                     SelectionContainer {
-                        if (renderMd) {
-                            MarkdownText(ChatCollapse.expandedBody(output!!, fromEnd = false))
-                        } else if (output != null) {
-                            Text(
-                                ChatCollapse.expandedBody(output, fromEnd = true),
-                                style = MaterialTheme.typography.bodySmall,
-                                fontFamily = FontFamily.Monospace,
-                                fontSize = 11.sp,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            )
+                        Column {
+                            if (family == ToolFamily.Write) {
+                                ChatCollapse.writeContent(item.argsJson)?.let { content ->
+                                    ToolArgumentBox("new content", content)
+                                }
+                            }
+                            if (family == ToolFamily.Edit) {
+                                ToolEditChanges(ChatCollapse.editChanges(item.argsJson))
+                            }
+                            if (renderMd) {
+                                MarkdownText(ChatCollapse.expandedBody(output!!, fromEnd = false))
+                            } else if (output != null) {
+                                ToolArgumentBox("result", output, fromEnd = true, truncate = true)
+                            }
                         }
                     }
                 } else {

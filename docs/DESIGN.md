@@ -118,6 +118,11 @@ Clients must assemble by `contentIndex`. `StreamReducer` state machine:
   belongs to the next segment, and clearing prevents duplicate rendering;
 - **`tool_execution_update.partialResult` is cumulative output** (not a delta);
   replace the card wholesale, which is also the docs' recommended display.
+- Tool cards retain the full tool argument JSON in addition to a short path/command
+  summary. `write` shows its `content`; `edit` renders each `edits[]` entry as
+  removed/added text. This is display data only: the arguments come from the RPC
+  tool call, not from the tool result. `toolcall_end.toolCall` is preferred when
+  present, while streamed `toolcall_delta` fragments are used as a fallback.
 
 Generation speed is **client-timed**, not a pi RPC field. `StreamReducer` records
 local arrival times: `t_start` is `agent_start` for the first LLM call of a turn

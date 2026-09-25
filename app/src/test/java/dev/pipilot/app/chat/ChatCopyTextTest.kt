@@ -19,6 +19,34 @@ class ChatCopyTextTest {
     }
 
     @Test
+    fun writeAndEditCopyIncludeVisibleArguments() {
+        assertEquals(
+            "write\n/tmp/a.txt\n\nhello\nWrote a.txt",
+            ChatItem.ToolCard(
+                toolCallId = "1",
+                toolName = "write",
+                argsSummary = "/tmp/a.txt",
+                output = "Wrote a.txt",
+                running = false,
+                isError = false,
+                argsJson = """{"path":"/tmp/a.txt","content":"hello"}""",
+            ).copyText(),
+        )
+        assertEquals(
+            "edit\n/tmp/a.txt\n\n− before\n+ after\nUpdated a.txt",
+            ChatItem.ToolCard(
+                toolCallId = "2",
+                toolName = "edit",
+                argsSummary = "/tmp/a.txt",
+                output = "Updated a.txt",
+                running = false,
+                isError = false,
+                argsJson = """{"edits":[{"oldText":"before","newText":"after"}]}""",
+            ).copyText(),
+        )
+    }
+
+    @Test
     fun toolAndBashIncludeCommandAndOutput() {
         assertEquals(
             "bash\nls -la\nfile.txt",
