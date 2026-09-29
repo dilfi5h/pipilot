@@ -309,7 +309,32 @@
       padding: 8px 10px; overflow-x: auto; font-size: 11px; line-height: 1.4;
     }
     .md pre code { background: none; color: inherit; padding: 0; }
-    .md a { color: var(--cyan); }
+    .md a, .md .lnk { color: var(--cyan); }
+    /* 链接不跳转，只在旁边给复制按钮；所以不画下划线，避免误导成可点 */
+    .md .lnk-path {
+      color: var(--on-surface-variant);
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: .92em;
+    }
+    /* 裸链接（CLI 输出里常见）太长时单行省略，复制按钮不受省略影响 */
+    .md .lnk-url {
+      display: inline-block;
+      max-width: 100%;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      vertical-align: bottom;
+    }
+    .lnk-copy {
+      font-size: 11px;
+      opacity: .5;
+      margin-left: 2px;
+      cursor: pointer;
+      user-select: none;
+      vertical-align: baseline;
+    }
+    .lnk-copy:hover { opacity: 1; }
+    .lnk-copy.done { color: var(--ok); opacity: 1; }
     .md table { border-collapse: collapse; font-size: 12px; margin-bottom: 6px; }
     .md th, .md td { border: 1px solid var(--outline); padding: 3px 6px; }
     /* LaTeX: 不渲染，识别出来后给原始 LaTeX + 复制按钮 */
@@ -361,6 +386,7 @@
       <label><input type="checkbox" id="hideThinking"> 隐藏 thinking</label>
       <label><input type="checkbox" id="demoTools"> 插入 write / edit / 通用 tool 样例</label>
       <label><input type="checkbox" id="demoMath" checked> 插入 LaTeX 公式样例（复制按钮）</label>
+      <label><input type="checkbox" id="demoLinks" checked> 插入链接样例</label>
       <label><input type="checkbox" id="showSpeed" checked> 显示 TTFT / tok/s</label>
       <label><input type="checkbox" id="demoLive" checked> 插入流式气泡样例</label>
       <label><input type="checkbox" id="darkPhone"> 深色手机框（仅背景试看）</label>
@@ -485,6 +511,27 @@
       if (!inner.trim()) return null;
       return { html: formulaBlock(delim.wrap(inner)), next: start + 1 };
     }
+    /** URL 来自已转义文本：& 已是 &amp;，只需再堵住能突破属性的 " 和尖括号 */
+    function attrEsc(s) {
+      return (s || "").replace(/"/g, "&quot;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+    }
+    function copyButton(url) {
+      return `<span class="lnk-copy" role="button" tabindex="0" data-url="${attrEsc(url)}" title="复制链接地址" onclick="copyLink(this)">⧉</span>`;
+    }
+    /** 链接一律不可点，只给复制按钮；非 http(s)/mailto 的目标（文件路径等）用等宽样式区分 */
+    function linkHtml(url, text, bare) {
+      const t = (url || "").trim();
+      const web = /^(https?:\/\/|mailto:)/i.test(t);
+      const cls = bare ? "lnk-url" : (web ? "lnk" : "lnk-path");
+      return `<span class="${cls}" title="${attrEsc(t)}">${text}</span>${copyButton(t)}`;
+    }
+    async function copyLink(el) {
+      const url = el.getAttribute("data-url") || "";
+      try { await navigator.clipboard.writeText(url); } catch (_) { /* mock 里可能被浏览器拒绝，忽略 */ }
+      el.textContent = "✓";
+      el.classList.add("done");
+      setTimeout(() => { el.textContent = "⧉"; el.classList.remove("done"); }, 1200);
+    }
     function inlineMd(src) {
       const codeSpans = [];
       let raw = src.replace(/`([^`]+)`/g, (_, code) => {
@@ -493,10 +540,28 @@
       });
       const protectedMath = protectInlineMath(raw);
       let s = esc(protectedMath.text);
+      // 1) markdown 链接先摘成占位，避免后面的裸链接正则钻进 href 里
+      const links = [];
+      s = s.replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, (_, text, url) => {
+        links.push({url, text});
+        return `\u0000LINK${links.length - 1}\u0000`;
+      });
+      // 2) 裸链接自动识别（CLI 输出里最常见）
+      //    前缀放宽成「非单词字符」：中文里 URL 常常紧跟全角标点，如「裸链接：https://…」
+      //    （markdown 链接已被摘成占位，所以不会钻进 href 里）
+      s = s.replace(/(^|[^\w$])((?:https?:\/\/|mailto:)[^\s<>()\[\]，。；：！？、"'`]+)/g, (_, pre, url) => {
+        links.push({url, text: url, bare: true});
+        return `${pre}\u0000LINK${links.length - 1}\u0000`;
+      });
+      // 3) 其余行内样式
       s = s.replace(/\*\*([^*]+)\*\*/g, "<b>$1</b>");
       s = s.replace(/~~([^~]+)~~/g, "<s>$1</s>");
       s = s.replace(/(^|[^\w])\*([^*\s][^*]*)\*/g, "$1<i>$2</i>");
-      s = s.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2">$1</a>');
+      // 4) 回填（文字来自已转义文本，不能再 esc 一次，否则 & 会变成 &amp;amp;）
+      s = s.replace(/\u0000LINK(\d+)\u0000/g, (_, index) => {
+        const l = links[Number(index)];
+        return linkHtml(l.url, l.text, l.bare);
+      });
       // 行内公式也不渲染，只标记成等宽 + 底色，保留原始 $...$
       s = s.replace(/\u0000MATH(\d+)\u0000/g, (_, index) => `<span class="math-inline">${esc(protectedMath.spans[Number(index)])}</span>`);
       s = s.replace(/\u0000CODE(\d+)\u0000/g, (_, index) => `<code>${esc(codeSpans[Number(index)])}</code>`);
@@ -827,6 +892,7 @@
       const extras = [
         ...(document.getElementById("demoTools").checked ? DEMO_TOOLS : []),
         ...(document.getElementById("demoMath").checked ? DEMO_MATH : []),
+        ...(document.getElementById("demoLinks").checked ? DEMO_LINKS : []),
         ...(document.getElementById("demoLive").checked ? DEMO_LIVE : []),
       ];
       const items = withMockSpeed([...s.items, ...extras]);
@@ -994,6 +1060,27 @@ RMSNorm(x)
         toksPerSec: null,
       },
     ];
+    const DEMO_LINKS = [
+      {
+        kind: "assistant",
+        key: "demo-links",
+        text: "链接样例（**不可点**，旁边 ⧉ 复制地址）：\n\n" +
+          "- 短文字：[Pi 官网](https://pi.dev)\n" +
+          "- 长文字：[点这里看完整的 Debian 13 安装、容器化部署与常见问题排查说明文档](https://pi.dev/docs/debian-13-install-and-containerization-guide)\n" +
+          "- 裸链接：https://github.com/dilfi5h/pipilot/releases\n" +
+          "- 带参数：https://example.com/a?b=1&c=2\n" +
+          "- 邮件：[发封邮件](mailto:someone@example.com)\n" +
+          "- 文件路径（等宽样式）：[配置文件](/root/.pi/agent/config.json)\n" +
+          "- 相对路径（等宽样式）：[README](../README.md)\n" +
+          "- 行内混排：改完记得看 [这个 PR](https://github.com/dilfi5h/pipilot/pull/1)，然后重启服务。",
+        thinking: null,
+        streaming: false,
+        time: "",
+        firstOfTurn: false,
+        ttftMs: null,
+        toksPerSec: null,
+      },
+    ];
     const DEMO_LIVE = [
       {
         kind: "assistant",
@@ -1023,6 +1110,7 @@ RMSNorm(x)
     document.getElementById("hideThinking").addEventListener("change", render);
     document.getElementById("demoTools").addEventListener("change", render);
     document.getElementById("demoMath").addEventListener("change", render);
+    document.getElementById("demoLinks").addEventListener("change", render);
     document.getElementById("showSpeed").addEventListener("change", render);
     document.getElementById("demoLive").addEventListener("change", render);
     document.getElementById("darkPhone").addEventListener("change", (e) => {

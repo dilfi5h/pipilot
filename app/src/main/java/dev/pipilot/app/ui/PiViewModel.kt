@@ -93,6 +93,23 @@ data class UiState(
     val historyEpoch: Long = 0,
 )
 
+/**
+ * Drop rows that were mid-flight when the connection died (the live bubble, half-run tool
+ * cards, streaming bash). Settled history is kept so a reconnect never blanks the chat.
+ */
+internal fun withoutInFlight(items: List<ChatItem>): List<ChatItem> = items.filterNot {
+    (it is ChatItem.AssistantText && it.streaming) ||
+        (it is ChatItem.ToolCard && it.running) ||
+        (it is ChatItem.BashOutput && it.running)
+}
+
+/**
+ * A full rebuild re-pins the list to the latest output; a reconnect rebuild must leave the
+ * user where they were reading, so it deliberately does not bump the epoch.
+ */
+internal fun nextHistoryEpoch(current: Long, fullRebuild: Boolean, pinToBottom: Boolean): Long =
+    if (fullRebuild && pinToBottom) current + 1 else current
+
 class PiViewModel(app: Application) : AndroidViewModel(app) {
 
     private val settingsStore = SettingsStore(app)
@@ -252,17 +269,22 @@ class PiViewModel(app: Application) : AndroidViewModel(app) {
                 // when the OS reclaims the network in the background, readLoop may neither error nor return, so we must probe ourselves
                 restartHeartbeat()
                 connectedAtMs = System.currentTimeMillis()
-                // Reconnect also rebuilds fully: live messages do not advance the cursor, so incremental sync would append already-shown messages again
+                // A full rebuild is still the only duplicate-free option: messages that arrived
+                // live never advance lastEntryId, so an incremental sync would re-append them.
                 if (!resetItems) lastEntryId = null
                 _ui.value = _ui.value.copy(
                     connected = true, connecting = false,
                     reconnecting = false, reconnectAttempt = 0, reconnectCountdown = 0,
                     connectionLabel = "Connected",
-                    items = emptyList(),
+                    // Reconnect must not blank the chat the user is reading: keep settled history
+                    // on screen and only drop rows that were mid-flight when the socket died.
+                    items = if (resetItems) emptyList() else withoutInFlight(_ui.value.items),
                     queueSteering = emptyList(),
                     queueFollowUp = emptyList(),
                 )
-                refreshAll()
+                // Same for the rebuild below: no historyEpoch bump, so ChatList keeps the
+                // user's scroll position instead of yanking them to the bottom.
+                refreshAll(pinToBottom = resetItems)
                 AppLog.i(TAG, "connect ok${if (!resetItems) " (resumed $lastSessionFile)" else ""}")
                 true
             } catch (inner: Exception) {
@@ -648,10 +670,12 @@ class PiViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    fun refreshAll() {
+    /** @param pinToBottom bump historyEpoch after a full rebuild so ChatList re-pins to the latest
+     *  output. Reconnect passes false: the user is already reading the list and must keep their place. */
+    fun refreshAll(pinToBottom: Boolean = true) {
         viewModelScope.launch { refreshState() }
         viewModelScope.launch { refreshModels() }
-        viewModelScope.launch { loadHistory() }
+        viewModelScope.launch { loadHistory(pinToBottom) }
         viewModelScope.launch { refreshStats() }
     }
 
@@ -839,7 +863,7 @@ class PiViewModel(app: Application) : AndroidViewModel(app) {
         return s.trimEnd('0').trimEnd('.')
     }
 
-    private suspend fun loadHistory() {
+    private suspend fun loadHistory(pinToBottom: Boolean = true) {
         var since = lastEntryId
         val id = PiCommands.nextId()
         var resp = client?.request(PiCommands.getEntries(since, id), id)
@@ -911,7 +935,7 @@ class PiViewModel(app: Application) : AndroidViewModel(app) {
         val nextItems = if (since == null) base + items else mergeItems(base, items)
         _ui.value = _ui.value.copy(
             items = nextItems,
-            historyEpoch = if (since == null) _ui.value.historyEpoch + 1 else _ui.value.historyEpoch,
+            historyEpoch = nextHistoryEpoch(_ui.value.historyEpoch, since == null, pinToBottom),
         )
     }
 

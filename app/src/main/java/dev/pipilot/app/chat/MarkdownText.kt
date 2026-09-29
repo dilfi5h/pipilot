@@ -1,6 +1,7 @@
 package dev.pipilot.app.chat
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -23,14 +24,22 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.LocalContentColor
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.TextLayoutResult
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontStyle
@@ -38,6 +47,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import kotlinx.coroutines.delay
 
 /**
  * Lightweight Markdown rendering: pi replies are mostly markdown, and plain Text turns them into a blob.
@@ -149,6 +159,15 @@ internal fun markdownInlineMathRuns(src: String): List<String> =
 internal fun markdownBlockKinds(src: String): List<String> =
     parseBlocks(src).map { it::class.simpleName ?: "?" }
 
+/**
+ * Test hook: every link run in order as (display text, url, is bare url).
+ * A markdown link and a bare URL both show up; inline code and `$…$` must not.
+ */
+internal fun markdownLinks(src: String): List<Triple<String, String?, Boolean>> =
+    parseInline(src)
+        .filter { it.second.linkUrl != null }
+        .map { Triple(it.first, it.second.linkUrl, it.second.linkBare) }
+
 // ---------- LaTeX detection (no rendering, copy the source) ----------
 
 private data class MathDelim(val open: String, val close: String) {
@@ -225,6 +244,10 @@ private data class InlineStyle(
     val code: Boolean = false,
     val strike: Boolean = false,
     val link: Boolean = false,
+    /** URL of a markdown link or a bare URL; the text (plus its copy glyph) copies it on tap. */
+    val linkUrl: String? = null,
+    /** Bare URL (no markdown syntax): rendered monospace so it reads as a target, not prose. */
+    val linkBare: Boolean = false,
     /** Inline LaTeX `$...$`: kept verbatim, only styled. */
     val math: Boolean = false,
 )
@@ -232,6 +255,17 @@ private data class InlineStyle(
 /** Boundary chars that may follow inline math (mirrors the HTML preview's punctuation set). */
 private fun isMathBoundary(c: Char?): Boolean =
     c == null || c.isWhitespace() || c in "，。！？、：；）】」》…—\"'.,;:!?)*"
+
+private fun isWordChar(c: Char): Boolean = c.isLetterOrDigit() || c == '_' || c == '$'
+
+private val BARE_URL_REGEX =
+    Regex("^(?:https?://|mailto:)[^\\s<>()\\[\\]，。；：！？、\"'`]+")
+
+/** End index (exclusive) of a bare URL starting at [start], or -1 when there is none. */
+private fun bareUrlEnd(text: String, start: Int): Int {
+    val m = BARE_URL_REGEX.find(text.substring(start)) ?: return -1
+    return start + m.value.length
+}
 
 /** Split into (text, style) runs; unknown markers are kept as-is. */
 private fun parseInline(text: String, base: InlineStyle = InlineStyle()): List<Pair<String, InlineStyle>> {
@@ -307,12 +341,38 @@ private fun parseInline(text: String, base: InlineStyle = InlineStyle()): List<P
                     i = close + 1
                 } else { lit.append(c); i++ }
             }
+            c == 'h' -> {
+                val end = bareUrlEnd(text, i)
+                val boundaryBefore = i == 0 || !isWordChar(text[i - 1])
+                if (end > i && boundaryBefore) {
+                    val url = text.substring(i, end)
+                    flush()
+                    runs.add(url to base.copy(link = true, linkBare = true, linkUrl = url))
+                    i = end
+                } else { lit.append(c); i++ }
+            }
             c == '[' -> {
                 val closeB = text.indexOf("](", i + 1)
-                val closeP = if (closeB > i) text.indexOf(')', closeB + 2) else -1
+                // Track paren depth so URLs that contain parentheses survive
+                // (e.g. https://en.wikipedia.org/wiki/Foo_(bar)); a bare indexOf(')')
+                // would stop at the first one and truncate the target.
+                var depth = 0
+                var closeP = -1
+                var j = if (closeB > i) closeB + 2 else 0
+                while (j < n) {
+                    val ch = text[j]
+                    if (ch == '(') depth++
+                    else if (ch == ')') {
+                        if (depth == 0) { closeP = j; break }
+                        depth--
+                    }
+                    j++
+                }
                 if (closeB > i && closeP > closeB) {
                     flush()
-                    runs.add(text.substring(i + 1, closeB) to base.copy(link = true))
+                    val label = text.substring(i + 1, closeB)
+                    val url = text.substring(closeB + 2, closeP)
+                    runs.add(label to base.copy(link = true, linkUrl = url.takeIf { it.isNotBlank() }))
                     i = closeP + 1
                 } else { lit.append(c); i++ }
             }
@@ -323,11 +383,19 @@ private fun parseInline(text: String, base: InlineStyle = InlineStyle()): List<P
     return runs
 }
 
+// ---------- Links: tap the text or its ⧉ glyph to copy the URL ----------
+
+private const val LINK_TAG = "url"
+private const val COPY_GLYPH = "⧉"
+private const val DONE_GLYPH = "✓"
+private val DoneColor = Color(0xFF43A047)
+
 @Composable
-private fun inlineText(text: String): AnnotatedString {
+private fun inlineText(text: String, copiedUrl: String? = null): AnnotatedString {
     val linkColor = MaterialTheme.colorScheme.primary
     val codeBg = Color(0x1F888888)
-    return remember(text, linkColor) {
+    val glyphColor = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.55f)
+    return remember(text, linkColor, glyphColor, copiedUrl) {
         buildAnnotatedString {
             for ((t, s) in parseInline(text)) {
                 pushStyle(
@@ -335,16 +403,66 @@ private fun inlineText(text: String): AnnotatedString {
                         fontWeight = if (s.bold) FontWeight.Bold else null,
                         fontStyle = if (s.italic) FontStyle.Italic else null,
                         textDecoration = if (s.strike) TextDecoration.LineThrough else null,
-                        fontFamily = if (s.code || s.math) FontFamily.Monospace else null,
+                        fontFamily = if (s.code || s.math || s.linkBare) FontFamily.Monospace else null,
                         background = if (s.code || s.math) codeBg else Color.Unspecified,
                         color = if (s.link) linkColor else Color.Unspecified,
                     )
                 )
-                append(t)
+                if (s.linkUrl == null) {
+                    append(t)
+                } else {
+                    pushStringAnnotation(LINK_TAG, s.linkUrl)
+                    append(t)
+                    pop()
+                    // 复制按钮：跟在文字后面的 ⧉，复制成功后短暂变 ✓
+                    val done = s.linkUrl == copiedUrl
+                    pushStyle(
+                        SpanStyle(
+                            color = if (done) DoneColor else glyphColor,
+                            fontSize = 10.sp,
+                        )
+                    )
+                    pushStringAnnotation(LINK_TAG, s.linkUrl)
+                    append(if (done) DONE_GLYPH else COPY_GLYPH)
+                    pop()
+                    pop()
+                }
                 pop()
             }
         }
     }
+}
+
+/**
+ * Text that copies the URL of a tapped link. The whole link text is the tap target, not just
+ * the ⧉ glyph: on a phone a 10sp glyph is a far too small target, and a link has no other action.
+ */
+@Composable
+private fun LinkAwareText(
+    text: String,
+    style: TextStyle,
+    color: Color,
+    copiedUrl: String?,
+    onCopyUrl: (String) -> Unit,
+    modifier: Modifier = Modifier,
+    fontWeight: FontWeight? = null,
+) {
+    val annotated = inlineText(text, copiedUrl)
+    var layout by remember { mutableStateOf<TextLayoutResult?>(null) }
+    Text(
+        text = annotated,
+        style = style,
+        color = color,
+        fontWeight = fontWeight,
+        onTextLayout = { layout = it },
+        modifier = modifier.pointerInput(annotated) {
+            detectTapGestures { pos ->
+                val lr = layout ?: return@detectTapGestures
+                val off = lr.getOffsetForPosition(pos)
+                annotated.getStringAnnotations(LINK_TAG, off, off).firstOrNull()?.let { onCopyUrl(it.item) }
+            }
+        },
+    )
 }
 
 // ---------- Simple code highlighting ----------
@@ -449,18 +567,39 @@ private fun highlightCode(code: String, lang: String?): AnnotatedString = buildA
 fun MarkdownText(markdown: String, modifier: Modifier = Modifier) {
     if (markdown.isBlank()) return
     val blocks = remember(markdown) { parseBlocks(markdown) }
+    val clipboard = LocalClipboardManager.current
+    var copiedUrl by remember { mutableStateOf<String?>(null) }
+    LaunchedEffect(copiedUrl) {
+        if (copiedUrl != null) {
+            delay(1_200)
+            copiedUrl = null
+        }
+    }
+    val onCopyUrl: (String) -> Unit = { url ->
+        clipboard.setText(AnnotatedString(url))
+        copiedUrl = url
+    }
     Column(modifier = modifier, verticalArrangement = Arrangement.spacedBy(6.dp)) {
         blocks.forEach { b ->
             when (b) {
-                is MdBlock.Para -> Text(inlineText(b.text), style = MaterialTheme.typography.bodyMedium)
-                is MdBlock.Heading -> Text(
-                    inlineText(b.text),
+                is MdBlock.Para -> LinkAwareText(
+                    text = b.text,
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = LocalContentColor.current,
+                    copiedUrl = copiedUrl,
+                    onCopyUrl = onCopyUrl,
+                )
+                is MdBlock.Heading -> LinkAwareText(
+                    text = b.text,
                     style = when (b.level) {
                         1 -> MaterialTheme.typography.titleLarge
                         2 -> MaterialTheme.typography.titleMedium
                         3 -> MaterialTheme.typography.titleSmall
                         else -> MaterialTheme.typography.bodyLarge
                     },
+                    color = LocalContentColor.current,
+                    copiedUrl = copiedUrl,
+                    onCopyUrl = onCopyUrl,
                     fontWeight = FontWeight.SemiBold,
                 )
                 is MdBlock.Code -> CodeBlock(b)
@@ -470,9 +609,12 @@ fun MarkdownText(markdown: String, modifier: Modifier = Modifier) {
                         style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
-                    Text(
-                        inlineText(b.text),
+                    LinkAwareText(
+                        text = b.text,
                         style = MaterialTheme.typography.bodyMedium,
+                        color = LocalContentColor.current,
+                        copiedUrl = copiedUrl,
+                        onCopyUrl = onCopyUrl,
                         modifier = Modifier.weight(1f),
                     )
                 }
@@ -484,10 +626,12 @@ fun MarkdownText(markdown: String, modifier: Modifier = Modifier) {
                             .background(MaterialTheme.colorScheme.outlineVariant, RoundedCornerShape(2.dp))
                     )
                     Spacer(Modifier.width(8.dp))
-                    Text(
-                        inlineText(b.text),
+                    LinkAwareText(
+                        text = b.text,
                         style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        copiedUrl = copiedUrl,
+                        onCopyUrl = onCopyUrl,
                     )
                 }
                 MdBlock.Rule -> Box(

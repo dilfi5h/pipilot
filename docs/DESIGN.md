@@ -199,6 +199,14 @@ etc.) only surface extension errors in the MVP and are not modeled one-by-one.
   down the old SSH immediately, then exponential-backoff reconnect (2s→30s).
   During reconnect the UI keeps the chat list + banner; on success resume with
   `pi --mode rpc --session <path>` and rebuild history fully via `get_entries`.
+  **A reconnect must not disturb what the user is reading:** the list is never
+  blanked (only rows that were mid-flight when the socket died — the live bubble,
+  half-run tool cards, streaming bash — are dropped), and the rebuild does not
+  bump `historyEpoch`, so `ChatList` keeps the user's scroll position instead of
+  yanking them to the bottom. Manual connect, new session and session switch keep
+  the old clear-and-repin behaviour. A full rebuild (not an incremental one) is
+  still used on reconnect because live messages never advance `lastEntryId`, so an
+  incremental sync would re-append them.
 - Background: ON_PAUSE starts a 10-minute FGS (WakeLock+WifiLock) and tightens
   the heartbeat to 20s; if the process is killed the FGS is not sticky-restarted
   (the connection lives in the ViewModel; an empty service has no SSH).
