@@ -193,7 +193,20 @@ etc.) only surface extension errors in the MVP and are not modeled one-by-one.
   on a personal LAN; public internet use should pin a fingerprint (see Roadmap).
 - Session listing does not go through RPC; a portable `find`+`stat` script runs
   via `runQuick`, sorts by mtime, takes the latest 30, then loads with
-  `switch_session`.
+  `switch_session`. The same SSH pass also dumps live
+  `pipilot-bridge` occupancy JSON (`pid` / `sessionFile` / `inbox` / `mode`).
+  A session is **TUI-occupied** when a live record has `mode=tui` and an inbox
+  socket. The session sheet labels each row Occupied / Idle. While the current
+  session is TUI-occupied, the composer hides Send and only offers Steer, which
+  writes `{source:pipilot,text}` to that process's Unix inbox (steer semantics
+  on the TUI). The phone RPC session is not prompted, so the desktop TUI stays
+  the owner. Inbox steer is text-only. After the socket accepts a steer the app
+  shows `Steering…`; it does not poll in the background. The occupied chat is a
+  snapshot, and an upward overscroll performed **at the bottom** explicitly
+  reloads that same jsonl (`switch_session` + full `get_entries`) and displays
+  newly persisted TUI output. Pulling downward remains ordinary navigation to
+  older messages. `Steering…` clears after a refresh observes a newer assistant
+  entry than the one visible when the steer was sent.
 
 ## 5. State and lifecycle
 
@@ -250,3 +263,4 @@ the repo cleaner and avoids reviewing a wrapper jar binary.
 - [ ] `export_html` + on-phone preview
 - [x] Signed release builds in CI (`assembleRelease`)
 - [ ] Encrypted credential storage
+- [ ] TUI intervention: one host extension (`tools/pi-bridge/index.ts`) writes occupancy JSON (pid → session jsonl + inbox socket) and listens on that socket. PiPilot discovers live TUI pids and writes inbox; it does not spawn a second RPC on the TUI's jsonl.

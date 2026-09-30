@@ -136,4 +136,25 @@ class ChatScrollTest {
             ),
         )
     }
+
+    @Test
+    fun occupiedRefreshOnlyAccumulatesUpwardOverscrollAtBottom() {
+        assertEquals(20f, ChatScroll.occupiedRefreshPull(0f, availableY = -20f, atBottom = true))
+        assertEquals(50f, ChatScroll.occupiedRefreshPull(20f, availableY = -30f, atBottom = true))
+        assertEquals(0f, ChatScroll.occupiedRefreshPull(20f, availableY = 10f, atBottom = true))
+        assertEquals(0f, ChatScroll.occupiedRefreshPull(20f, availableY = -10f, atBottom = false))
+        assertEquals(ChatScroll.REFRESH_PULL_PX, ChatScroll.occupiedRefreshPull(60f, availableY = -30f, atBottom = true))
+    }
+
+    @Test
+    fun occupiedRefreshReleaseUsesCurrentGestureNotPastThreshold() {
+        val armed = OccupiedRefreshGesture().move(-80f, atBottom = true)
+        assertTrue(armed.shouldRefreshOnRelease(atBottom = true))
+
+        val pulledBackDown = armed.move(5f, atBottom = true)
+        assertFalse(pulledBackDown.shouldRefreshOnRelease(atBottom = true))
+
+        val leftBottom = armed.move(-5f, atBottom = false)
+        assertFalse(leftBottom.shouldRefreshOnRelease(atBottom = false))
+    }
 }

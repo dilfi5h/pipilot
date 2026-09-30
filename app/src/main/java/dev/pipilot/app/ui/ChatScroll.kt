@@ -19,9 +19,32 @@ internal data class ChatVisibleItem(
     val size: Int,
 )
 
+internal data class OccupiedRefreshGesture(
+    val pullPx: Float = 0f,
+) {
+    fun move(dy: Float, atBottom: Boolean, thresholdPx: Float = ChatScroll.REFRESH_PULL_PX): OccupiedRefreshGesture =
+        copy(pullPx = ChatScroll.occupiedRefreshPull(pullPx, dy, atBottom, thresholdPx))
+
+    fun shouldRefreshOnRelease(atBottom: Boolean, thresholdPx: Float = ChatScroll.REFRESH_PULL_PX): Boolean =
+        atBottom && pullPx >= thresholdPx
+}
+
 internal object ChatScroll {
     /** How far above true bottom still counts as "stuck to the latest output." */
     const val FOLLOW_SLACK_PX = 80
+
+    /** Upward overscroll required at the bottom before reloading a TUI-owned jsonl. */
+    const val REFRESH_PULL_PX = 72f
+
+    fun occupiedRefreshPull(
+        currentPx: Float,
+        availableY: Float,
+        atBottom: Boolean,
+        thresholdPx: Float = REFRESH_PULL_PX,
+    ): Float {
+        if (!atBottom || availableY >= 0f) return 0f
+        return (currentPx - availableY).coerceAtMost(thresholdPx)
+    }
 
     fun isAtBottom(
         itemCount: Int,

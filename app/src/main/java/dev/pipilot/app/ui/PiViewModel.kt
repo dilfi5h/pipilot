@@ -12,6 +12,8 @@ import dev.pipilot.app.chat.ChatItem
 import dev.pipilot.app.chat.StreamReducer
 import dev.pipilot.app.keepalive.ConnectionKeepAliveService
 import dev.pipilot.app.log.AppLog
+import dev.pipilot.app.occupancy.Occupancy
+import dev.pipilot.app.occupancy.SessionOccupancy
 import dev.pipilot.app.rpc.PiCommands
 import dev.pipilot.app.rpc.PiEvent
 import dev.pipilot.app.rpc.PiModel
@@ -83,6 +85,12 @@ data class UiState(
     val sessions: List<SessionEntryInfo> = emptyList(),
     val sessionsLoading: Boolean = false,
     val sessionsDir: String? = null,
+    /** Live pipilot-bridge occupancy on the host (TUI pid → session jsonl + inbox). */
+    val occupancies: List<SessionOccupancy> = emptyList(),
+    /** An inbox steer was accepted by the TUI socket; cleared after a later assistant entry is observed. */
+    val tuiSteering: Boolean = false,
+    /** Manual bottom-pull reload of a TUI-owned session is in progress. */
+    val tuiRefreshing: Boolean = false,
     val queueSteering: List<String> = emptyList(),
     val queueFollowUp: List<String> = emptyList(),
     /** abort/clear_queue restore unsent queue text into the composer; UI should call consumeRestoreDraft after applying. */
@@ -109,6 +117,12 @@ internal fun withoutInFlight(items: List<ChatItem>): List<ChatItem> = items.filt
  */
 internal fun nextHistoryEpoch(current: Long, fullRebuild: Boolean, pinToBottom: Boolean): Long =
     if (fullRebuild && pinToBottom) current + 1 else current
+
+internal fun steeringPendingAfterRefresh(
+    pending: Boolean,
+    baselineAssistantId: String?,
+    latestAssistantId: String?,
+): Boolean = pending && (latestAssistantId == null || latestAssistantId == baselineAssistantId)
 
 class PiViewModel(app: Application) : AndroidViewModel(app) {
 
@@ -185,6 +199,10 @@ class PiViewModel(app: Application) : AndroidViewModel(app) {
     private var lastSessionFile: String? = null
     /** Last append-only entry id synced for the current session. */
     private var lastEntryId: String? = null
+    /** Last assistant entry in the most recently loaded on-disk history. */
+    private var lastAssistantEntryId: String? = null
+    /** Assistant cursor captured when the last TUI steer was accepted. */
+    private var tuiSteerBaselineAssistantId: String? = null
 
     /** Local streaming flag: get_state snapshots lag; agent_start/end are the live signals. */
     @Volatile private var locallyStreaming = false
@@ -524,11 +542,19 @@ class PiViewModel(app: Application) : AndroidViewModel(app) {
     // ---------- User actions ----------
 
     fun sendPrompt(text: String, images: List<Pair<String, String>> = emptyList()) {
+        if (currentTuiInbox() != null) {
+            sendInboxSteer(text, images)
+            return
+        }
         enqueueUserMessage(text, images, whileStreaming = StreamingSend.FollowUp)
     }
 
     /** Steer while streaming: delivered after current tools finish, before the next LLM call. Falls back to a normal prompt when idle. */
     fun sendSteer(text: String, images: List<Pair<String, String>> = emptyList()) {
+        if (currentTuiInbox() != null) {
+            sendInboxSteer(text, images)
+            return
+        }
         enqueueUserMessage(text, images, whileStreaming = StreamingSend.Steer)
     }
 
@@ -571,6 +597,44 @@ class PiViewModel(app: Application) : AndroidViewModel(app) {
                         imageCount = images.size,
                     ),
                 )
+            }
+        }
+    }
+
+    private fun currentTuiInbox(): String? =
+        Occupancy.tuiOccupancyFor(_ui.value.state?.sessionFile, _ui.value.occupancies)?.inbox
+
+    /**
+     * Write a steer into the TUI process inbox socket (pipilot-bridge).
+     * Does not prompt our RPC session, so the desktop TUI stays the owner.
+     */
+    private fun sendInboxSteer(text: String, images: List<Pair<String, String>>) {
+        val msg = text.trim()
+        val inbox = currentTuiInbox()
+        if (inbox.isNullOrBlank()) return
+        if (images.isNotEmpty()) {
+            _ui.value = _ui.value.copy(error = "Inbox steer is text-only")
+            return
+        }
+        if (msg.isEmpty()) return
+        viewModelScope.launch {
+            try {
+                val out = SshConnector.runQuick(activeSettings.value.toSshConfig(), Occupancy.inboxSteerCommand(inbox, msg))
+                if (!out.contains("OK")) {
+                    _ui.value = _ui.value.copy(error = "Inbox steer failed: ${out.ifBlank { "no response" }}")
+                    return@launch
+                }
+                _ui.value = _ui.value.copy(
+                    items = _ui.value.items + ChatItem.UserText(
+                        msg,
+                        key = "user-${System.nanoTime()}",
+                    ),
+                    tuiSteering = true,
+                )
+                tuiSteerBaselineAssistantId = lastAssistantEntryId
+            } catch (e: Exception) {
+                AppLog.e(TAG, "inbox steer FAILED: ${e.message}")
+                _ui.value = _ui.value.copy(error = "Inbox steer failed: ${e.message}")
             }
         }
     }
@@ -654,12 +718,16 @@ class PiViewModel(app: Application) : AndroidViewModel(app) {
                 // After a new session, clear the resume target: a later reconnect should stay on the new session, not jump back
                 lastSessionFile = null
                 lastEntryId = null
+                lastAssistantEntryId = null
+                tuiSteerBaselineAssistantId = null
                 _ui.value = _ui.value.copy(
                     items = listOf(ChatItem.SystemNote("New session started", key = "new-session-${System.currentTimeMillis()}")),
                     statsText = null,
                     queueSteering = emptyList(),
                     queueFollowUp = emptyList(),
                     restoreDraft = null,
+                    tuiSteering = false,
+                    tuiRefreshing = false,
                 )
                 refreshAll()
             } else {
@@ -677,6 +745,7 @@ class PiViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch { refreshModels() }
         viewModelScope.launch { loadHistory(pinToBottom) }
         viewModelScope.launch { refreshStats() }
+        viewModelScope.launch { loadOccupancy() }
     }
 
     /**
@@ -881,9 +950,28 @@ class PiViewModel(app: Application) : AndroidViewModel(app) {
         if (resp?.success == true) AppLog.d(TAG, histDetail) else AppLog.w(TAG, histDetail)
         if (entries == null || resp?.success != true) return
         val items = ArrayList<ChatItem>()
+        var newestAssistantEntryId: String? = if (since == null) null else lastAssistantEntryId
         for (entryElement in entries) {
             val entry = entryElement as? JsonObject ?: continue
             entry.str("id")?.takeIf { it.isNotBlank() }?.let { lastEntryId = it }
+            // pipilot-bridge persists an accepted steer as an inbox custom_message. Render it
+            // as the user's row after a full occupied-session reload (the optimistic local row
+            // is discarded by that rebuild), but keep unrelated extension messages hidden.
+            if (entry.str("type") == "custom_message" && entry.str("customType") == "inbox") {
+                val content = (entry["content"] as? JsonPrimitive)?.contentOrNull.orEmpty()
+                val text = content.lineSequence().dropWhile { it.trim().startsWith("[inbox") }
+                    .joinToString("\n").trim()
+                if (text.isNotBlank()) {
+                    items.add(
+                        ChatItem.UserText(
+                            text,
+                            key = "hist-inbox-${entry.str("id") ?: items.size}",
+                            timeMs = 0,
+                        ),
+                    )
+                }
+                continue
+            }
             val obj = (entry["message"] as? JsonObject) ?: continue
             val msg = dev.pipilot.app.rpc.ChatMessage.from(obj)
             when (msg.role) {
@@ -895,6 +983,7 @@ class PiViewModel(app: Application) : AndroidViewModel(app) {
                     }
                 }
                 "assistant" -> {
+                    newestAssistantEntryId = entry.str("id") ?: newestAssistantEntryId
                     val text = msg.blocks.filter { it.type == "text" }.joinToString("") { it.text ?: "" }
                     val thinking = msg.blocks.filter { it.type == "thinking" }.joinToString("") { it.text ?: "" }
                     if (text.isNotEmpty() || thinking.isNotEmpty()) {
@@ -937,6 +1026,7 @@ class PiViewModel(app: Application) : AndroidViewModel(app) {
             items = nextItems,
             historyEpoch = nextHistoryEpoch(_ui.value.historyEpoch, since == null, pinToBottom),
         )
+        lastAssistantEntryId = newestAssistantEntryId
     }
 
     fun setModel(model: PiModel) {
@@ -961,6 +1051,7 @@ class PiViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch {
             _ui.value = _ui.value.copy(sessionsLoading = true)
             try {
+                loadOccupancy()
                 // Directory of the active session: covers custom --session-dir cases as a fallback
                 val fallbackDir = _ui.value.state?.sessionFile
                     ?.takeIf { it.isNotBlank() }
@@ -991,7 +1082,7 @@ class PiViewModel(app: Application) : AndroidViewModel(app) {
                 val sessDir = rawLines.firstOrNull { it.startsWith("SESSDIR:") }
                     ?.removePrefix("SESSDIR:")?.trim()?.takeIf { it.isNotBlank() }
                 val paths = rawLines.filter { it.isNotBlank() && !it.startsWith("SESSDIR:") }
-                AppLog.i(TAG, "listSessions dir=$sessDir -> ${paths.size} files")
+                AppLog.i(TAG, "listSessions dir=$sessDir -> ${paths.size} files occupancy=${_ui.value.occupancies.size}")
                 val entries = paths.map { line ->
                     val path = line.substringBefore('\t')
                     val customName = line.substringAfter('\t', "").takeIf { it.isNotBlank() }
@@ -1018,10 +1109,57 @@ class PiViewModel(app: Application) : AndroidViewModel(app) {
             if (resp?.success == true) {
                 lastSessionFile = path
                 lastEntryId = null
-                _ui.value = _ui.value.copy(items = emptyList())
+                lastAssistantEntryId = null
+                tuiSteerBaselineAssistantId = null
+                _ui.value = _ui.value.copy(
+                    items = emptyList(),
+                    tuiSteering = false,
+                    tuiRefreshing = false,
+                )
                 refreshAll()
             } else {
                 _ui.value = _ui.value.copy(error = resp?.error)
+            }
+        }
+    }
+
+    /**
+     * An occupied session is only a read-only snapshot in this RPC process. Reload the same
+     * session from its jsonl when the user pulls upward past the bottom; there is deliberately
+     * no background polling. The TUI remains the only process that receives prompts.
+     */
+    fun refreshOccupiedHistory() {
+        val path = _ui.value.state?.sessionFile ?: return
+        if (!Occupancy.isTuiOccupied(path, _ui.value.occupancies) || _ui.value.tuiRefreshing) return
+        viewModelScope.launch {
+            _ui.value = _ui.value.copy(tuiRefreshing = true)
+            try {
+                val rpc = client ?: return@launch
+                val line = PiCommands.switchSession(path)
+                val resp = rpc.request(line, extractId(line) ?: return@launch)
+                val cancelled = resp?.data?.get("cancelled")?.jsonPrimitive?.contentOrNull == "true"
+                if (resp?.success != true || cancelled) {
+                    _ui.value = _ui.value.copy(
+                        error = if (cancelled) "Refresh cancelled by pi" else "Refresh failed: ${resp?.error ?: "no response"}",
+                    )
+                    return@launch
+                }
+                lastSessionFile = path
+                lastEntryId = null
+                loadHistory(pinToBottom = true)
+                val stillPending = steeringPendingAfterRefresh(
+                    pending = _ui.value.tuiSteering,
+                    baselineAssistantId = tuiSteerBaselineAssistantId,
+                    latestAssistantId = lastAssistantEntryId,
+                )
+                if (!stillPending) tuiSteerBaselineAssistantId = null
+                _ui.value = _ui.value.copy(tuiSteering = stillPending)
+                AppLog.i(TAG, "occupied history reloaded: $path steering=$stillPending")
+            } catch (e: Exception) {
+                AppLog.e(TAG, "occupied history refresh FAILED: ${e.message}")
+                _ui.value = _ui.value.copy(error = "Refresh failed: ${e.message}")
+            } finally {
+                _ui.value = _ui.value.copy(tuiRefreshing = false)
             }
         }
     }
@@ -1055,6 +1193,19 @@ class PiViewModel(app: Application) : AndroidViewModel(app) {
                 AppLog.e(TAG, "deleteSession ERROR: ${e.message}")
                 _ui.value = _ui.value.copy(error = "Delete failed: ${e.message}")
             }
+        }
+    }
+
+    private suspend fun loadOccupancy() {
+        val s = activeSettings.value
+        if (s.host.isBlank()) return
+        try {
+            val dump = SshConnector.runQuick(s.toSshConfig(), Occupancy.LIST_COMMAND)
+            val recs = Occupancy.parseDump(dump)
+            AppLog.d(TAG, "occupancy -> ${recs.size} live")
+            _ui.value = _ui.value.copy(occupancies = recs)
+        } catch (e: Exception) {
+            AppLog.w(TAG, "occupancy FAILED: ${e.message}")
         }
     }
 

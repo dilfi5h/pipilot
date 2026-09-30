@@ -67,4 +67,12 @@ class ReconnectUiTest {
         assertEquals(3L, nextHistoryEpoch(current = 3L, fullRebuild = false, pinToBottom = true))
         assertEquals(3L, nextHistoryEpoch(current = 3L, fullRebuild = false, pinToBottom = false))
     }
+
+    @Test
+    fun steeringStaysPendingUntilANewerAssistantEntryIsLoaded() {
+        assertEquals(true, steeringPendingAfterRefresh(true, "a1", "a1"))
+        assertEquals(true, steeringPendingAfterRefresh(true, null, null))
+        assertEquals(false, steeringPendingAfterRefresh(true, "a1", "a2"))
+        assertEquals(false, steeringPendingAfterRefresh(false, "a1", "a1"))
+    }
 }

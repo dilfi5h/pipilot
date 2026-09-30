@@ -93,6 +93,9 @@ import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.input.pointer.PointerEventPass
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.input.pointer.positionChange
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.geometry.CornerRadius
@@ -111,9 +114,11 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.platform.LocalDensity
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import dev.pipilot.app.chat.ChatCollapse
+import dev.pipilot.app.occupancy.Occupancy
 import dev.pipilot.app.chat.ChatItem
 import dev.pipilot.app.chat.CopyItemButton
 import dev.pipilot.app.chat.MarkdownText
@@ -311,7 +316,12 @@ fun PiScreen(viewModel: PiViewModel) {
                 if (ui.reconnecting) {
                     ReconnectBanner(ui, viewModel)
                 }
-                ChatList(ui, onClearQueue = viewModel::clearQueueToEditor, modifier = Modifier.weight(1f))
+                ChatList(
+                    ui,
+                    onClearQueue = viewModel::clearQueueToEditor,
+                    onRefreshOccupied = viewModel::refreshOccupiedHistory,
+                    modifier = Modifier.weight(1f),
+                )
             }
         }
     }
@@ -460,15 +470,58 @@ private fun QueueBanner(ui: UiState, onClear: () -> Unit) {
 }
 
 @Composable
-private fun ChatList(ui: UiState, onClearQueue: () -> Unit, modifier: Modifier = Modifier) {
+private fun ChatList(
+    ui: UiState,
+    onClearQueue: () -> Unit,
+    onRefreshOccupied: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
     val listState = rememberLazyListState()
     val lastItemLen = ui.items.lastOrNull()?.let { it.textLength() } ?: 0
     val lastKey = ui.items.lastOrNull()?.key
     val hasQueue = ui.queueSteering.isNotEmpty() || ui.queueFollowUp.isNotEmpty()
-    val lastListIndex = ui.items.size + (if (hasQueue) 1 else 0) - 1
+    val tuiOccupied = Occupancy.isTuiOccupied(ui.state?.sessionFile, ui.occupancies)
+    val hasOccupiedFooter = tuiOccupied
+    val lastListIndex = ui.items.size + (if (hasQueue) 1 else 0) + (if (hasOccupiedFooter) 1 else 0) - 1
     val followBottom = remember { mutableStateOf(true) }
     val pinningBottom = remember { mutableStateOf(false) }
     val jumpScope = rememberCoroutineScope()
+    var occupiedPullPx by remember { mutableStateOf(0f) }
+    val refreshPullThresholdPx = with(LocalDensity.current) { 72.dp.toPx() }
+    val occupiedRefreshGesture = if (tuiOccupied) {
+        Modifier.pointerInput(tuiOccupied, ui.tuiRefreshing, lastListIndex, refreshPullThresholdPx) {
+            // Observe raw pointer movement without consuming it. Nested-scroll overscroll is
+            // swallowed by Android's stretch effect on some devices, so onPostScroll never sees
+            // an `available` delta there. Raw observation works consistently while leaving the
+            // LazyColumn in full control of ordinary upward/downward navigation.
+            awaitPointerEventScope {
+                while (true) {
+                    val down = awaitPointerEvent(PointerEventPass.Initial)
+                    if (down.changes.none { it.pressed }) continue
+                    occupiedPullPx = 0f
+                    var gesture = OccupiedRefreshGesture()
+                    while (true) {
+                        val event = awaitPointerEvent(PointerEventPass.Initial)
+                        val pressed = event.changes.filter { it.pressed }
+                        if (pressed.isEmpty()) break
+                        val dy = event.changes.firstOrNull()?.positionChange()?.y ?: 0f
+                        gesture = gesture.move(
+                            dy = dy,
+                            atBottom = !listState.canScrollForward,
+                            thresholdPx = refreshPullThresholdPx,
+                        )
+                        occupiedPullPx = gesture.pullPx
+                    }
+                    val shouldRefresh = gesture.shouldRefreshOnRelease(
+                        atBottom = !listState.canScrollForward,
+                        thresholdPx = refreshPullThresholdPx,
+                    )
+                    occupiedPullPx = 0f
+                    if (shouldRefresh && !ui.tuiRefreshing) onRefreshOccupied()
+                }
+            }
+        }
+    } else Modifier
     suspend fun pinToBottom(animate: Boolean = false) {
         pinningBottom.value = true
         try {
@@ -521,7 +574,7 @@ private fun ChatList(ui: UiState, onClearQueue: () -> Unit, modifier: Modifier =
     Box(modifier) {
         LazyColumn(
             state = listState,
-            modifier = Modifier.fillMaxSize(),
+            modifier = Modifier.fillMaxSize().then(occupiedRefreshGesture),
             contentPadding = androidx.compose.foundation.layout.PaddingValues(12.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
@@ -544,6 +597,30 @@ private fun ChatList(ui: UiState, onClearQueue: () -> Unit, modifier: Modifier =
             if (hasQueue) {
                 item(key = "queue") {
                     QueueBanner(ui, onClear = onClearQueue)
+                }
+            }
+            if (hasOccupiedFooter) {
+                item(key = "occupied-refresh") {
+                    Row(
+                        Modifier.fillMaxWidth().padding(vertical = 8.dp),
+                        horizontalArrangement = Arrangement.Center,
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        if (ui.tuiRefreshing || ui.tuiSteering) {
+                            CircularProgressIndicator(Modifier.size(14.dp), strokeWidth = 2.dp)
+                            Spacer(Modifier.size(6.dp))
+                        }
+                        Text(
+                            when {
+                                ui.tuiRefreshing -> "Refreshing…"
+                                ui.tuiSteering -> "Steering… pull up at bottom to refresh"
+                                occupiedPullPx > 0f -> "Pull up to refresh"
+                                else -> "Pull up at bottom to refresh"
+                            },
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
                 }
             }
         }
@@ -1208,13 +1285,14 @@ private fun InputBar(viewModel: PiViewModel, ui: UiState) {
                 }
             }
             val streaming = ui.state?.isStreaming == true
+            val tuiOccupied = Occupancy.isTuiOccupied(ui.state?.sessionFile, ui.occupancies)
             Row(
                 Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 6.dp),
                 verticalAlignment = Alignment.Bottom,
             ) {
                 IconButton(
                     onClick = { picker.launch("image/*") },
-                    enabled = !preparing && pendingImagePayloads.size < 4,
+                    enabled = !tuiOccupied && !preparing && pendingImagePayloads.size < 4,
                 ) {
                     if (preparing) CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp)
                     else Icon(Icons.Filled.Image, "Add image")
@@ -1226,6 +1304,7 @@ private fun InputBar(viewModel: PiViewModel, ui: UiState) {
                     placeholder = {
                         Text(
                             when {
+                                tuiOccupied -> "Steer TUI…"
                                 streaming -> "Steer or queue…"
                                 else -> "Message pi"
                             },
@@ -1233,7 +1312,15 @@ private fun InputBar(viewModel: PiViewModel, ui: UiState) {
                     },
                     maxLines = 5,
                 )
-                if (streaming) {
+                if (tuiOccupied) {
+                    TextButton(
+                        onClick = {
+                            viewModel.sendSteer(text)
+                            afterSend()
+                        },
+                        enabled = text.isNotBlank(),
+                    ) { Text("Steer") }
+                } else if (streaming) {
                     IconButton(onClick = { viewModel.abort() }) {
                         Icon(Icons.Filled.Stop, "Abort and recall queue", tint = MaterialTheme.colorScheme.error)
                     }
@@ -1566,10 +1653,8 @@ private fun SessionsSheet(ui: UiState, viewModel: PiViewModel, onDismiss: () -> 
                     // Do not stack TextButton + combinedClickable: the button already has clickable,
                     // the inner dispatcher gets the event first, and a long-press release is eaten as a click so onLongClick never fires.
                     // A plain Text with one combinedClickable lets tap and long-press both work.
-                    Text(
-                        text = s.name,
-                        style = MaterialTheme.typography.bodyLarge,
-                        fontFamily = FontFamily.Monospace,
+                    val occupied = Occupancy.isTuiOccupied(s.path, ui.occupancies)
+                    Column(
                         modifier = Modifier
                             .fillMaxWidth()
                             .combinedClickable(
@@ -1579,8 +1664,23 @@ private fun SessionsSheet(ui: UiState, viewModel: PiViewModel, onDismiss: () -> 
                                 },
                                 onLongClick = { pendingDelete = s },
                             )
-                            .padding(horizontal = 8.dp, vertical = 14.dp),
-                    )
+                            .padding(horizontal = 8.dp, vertical = 10.dp),
+                    ) {
+                        Text(
+                            text = s.name,
+                            style = MaterialTheme.typography.bodyLarge,
+                            fontFamily = FontFamily.Monospace,
+                        )
+                        Text(
+                            text = Occupancy.statusLabel(s.path, ui.occupancies),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = if (occupied) {
+                                MaterialTheme.colorScheme.tertiary
+                            } else {
+                                MaterialTheme.colorScheme.onSurfaceVariant
+                            },
+                        )
+                    }
                 }
             }
         }
