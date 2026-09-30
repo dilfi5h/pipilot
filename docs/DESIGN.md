@@ -63,6 +63,10 @@ pipe and lines up naturally with RPC's stdio interface:
   `SelectionContainer` for highlights; a Copy icon lives in `DisableSelection`
   chrome (timestamp row / code-block header) so a tap never starts a selection.
   Live streaming bubbles stay unselectable because tokens rebuild the item.
+  Fenced code blocks soft-wrap to the bubble width (including unbroken tokens);
+  they no longer rely on horizontal scroll. A line that fills the width without
+  wrapping *is* the whole line — no fade/arrow hint that would imply more text.
+  Copy / selection still use the source string; visual wraps do not insert `\n`.
 - Small package (minSdk 26, no WebView/JS engine).
 
 ### 2.3 Layers

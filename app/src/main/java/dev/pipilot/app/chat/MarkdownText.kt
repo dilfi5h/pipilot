@@ -44,6 +44,7 @@ import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.LineBreak
 import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -756,14 +757,15 @@ private fun CodeBlock(block: MdBlock.Code) {
                     }
                 }
             }
+            // Soft-wrap to the bubble width, including unbroken tokens. Copy still
+            // uses [block.code]; visual wraps do not insert '\n'.
             Text(
                 remember(block.code, block.lang) { highlightCode(block.code, block.lang) },
-                style = MaterialTheme.typography.bodySmall,
+                style = MaterialTheme.typography.bodySmall.copy(lineBreak = LineBreak.Simple),
                 fontFamily = FontFamily.Monospace,
                 fontSize = 11.sp,
                 color = CodeDefault,
-                softWrap = false,
-                modifier = Modifier.horizontalScroll(rememberScrollState()),
+                modifier = Modifier.fillMaxWidth(),
             )
         }
     }
