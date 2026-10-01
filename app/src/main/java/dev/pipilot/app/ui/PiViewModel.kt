@@ -136,6 +136,15 @@ internal fun steeringPendingAfterRefresh(
  */
 internal fun takeoverTimeoutMs(queued: Boolean): Long = if (queued) 90_000 else 15_000
 
+/**
+ * Every exit from a takeover attempt must clear [UiState.tuiTakeover], otherwise
+ * the occupied banner sticks on "正在退出…" forever and hides the 接管 button
+ * (the user cannot retry). Regression test: an early `return@launch` that skipped
+ * the reset left the UI permanently wedged after a mid-takeover disconnect.
+ */
+internal fun UiState.takeoverFailed(error: String): UiState =
+    copy(error = error, tuiTakeover = false, tuiTakeoverQueued = false)
+
 class PiViewModel(app: Application) : AndroidViewModel(app) {
 
     private val settingsStore = SettingsStore(app)
@@ -1203,9 +1212,8 @@ class PiViewModel(app: Application) : AndroidViewModel(app) {
                 val out = SshConnector.runQuick(activeSettings.value.toSshConfig(), Occupancy.takeoverCommand(inbox))
                 when (Occupancy.parseTakeoverReply(out)) {
                     Occupancy.TakeoverReply.FAILED -> {
-                        _ui.value = _ui.value.copy(
-                            error = "Takeover failed: ${out.ifBlank { "no response" }}",
-                            tuiTakeover = false,
+                        _ui.value = _ui.value.takeoverFailed(
+                            "Takeover failed: ${out.ifBlank { "no response" }}",
                         )
                         return@launch
                     }
@@ -1225,23 +1233,32 @@ class PiViewModel(app: Application) : AndroidViewModel(app) {
                     }
                 }
                 if (!gone) {
-                    _ui.value = _ui.value.copy(
-                        error = if (queued) "TUI 仍在运行，quit 已排队，稍后下拉刷新查看"
+                    _ui.value = _ui.value.takeoverFailed(
+                        if (queued) "TUI 仍在运行，quit 已排队，稍后下拉刷新查看"
                         else "Takeover timed out",
-                        tuiTakeover = false,
-                        tuiTakeoverQueued = false,
                     )
                     return@launch
                 }
-                val rpc = client ?: return@launch
+                // The TUI is already gone at this point, so every exit from here
+                // goes through takeoverFailed, which clears tuiTakeover.
+                val fail = { msg: String -> _ui.value = _ui.value.takeoverFailed(msg) }
+                val rpc = client
+                if (rpc == null) {
+                    fail("Takeover failed: 已断开连接")
+                    return@launch
+                }
                 val line = PiCommands.switchSession(path)
-                val resp = rpc.request(line, extractId(line) ?: return@launch)
+                val id = extractId(line)
+                if (id == null) {
+                    fail("Takeover failed: 内部错误")
+                    return@launch
+                }
+                val resp = rpc.request(line, id)
                 val cancelled = resp?.data?.get("cancelled")?.jsonPrimitive?.contentOrNull == "true"
                 if (resp?.success != true || cancelled) {
-                    _ui.value = _ui.value.copy(
-                        error = if (cancelled) "Takeover cancelled by pi" else "Takeover failed: ${resp?.error ?: "no response"}",
-                        tuiTakeover = false,
-                        tuiTakeoverQueued = false,
+                    fail(
+                        if (cancelled) "Takeover cancelled by pi"
+                        else "Takeover failed: ${resp?.error ?: "no response"}",
                     )
                     return@launch
                 }
@@ -1262,11 +1279,7 @@ class PiViewModel(app: Application) : AndroidViewModel(app) {
                 AppLog.i(TAG, "takeover complete: $path")
             } catch (e: Exception) {
                 AppLog.e(TAG, "takeover FAILED: ${e.message}")
-                _ui.value = _ui.value.copy(
-                    error = "Takeover failed: ${e.message}",
-                    tuiTakeover = false,
-                    tuiTakeoverQueued = false,
-                )
+                _ui.value = _ui.value.takeoverFailed("Takeover failed: ${e.message}")
             }
         }
     }

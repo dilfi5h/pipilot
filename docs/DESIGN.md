@@ -231,13 +231,19 @@ etc.) only surface extension errors in the MVP and are not modeled one-by-one.
   disconnects (proving it got the reply), with a short fallback timer.
 - **Hand back**: the reverse of takeover. When the app owns a session, the
   session row offers 交还 (behind a confirmation dialog). It SSH-runs
-  `screen -dmS pipilot-back-<id> pi --session <file>` (`pi --session`
-  accepts a file path directly; a stale screen with the same name is
-  replaced first), then polls occupancy for the new TUI record (30s
-  timeout). Once the TUI owns the session the app stays connected and
-  the UI automatically switches to steer mode — the InputBar shows
-  "Steer TUI…" and the occupied footer reappears — because the session
-  is TUI-occupied again. No reconnect needed.
+  `screen -dmS pipilot-back-<id>-<hash> bash -c 'pi --session <file>; screen -X quit'`
+  (`pi --session` accepts a file path directly; a stale screen with the
+  same name is replaced first), then polls occupancy for the new TUI
+  record (30s timeout). Once the TUI owns the session the app stays
+  connected and the UI automatically switches to steer mode — the
+  InputBar shows "Steer TUI…" and the occupied footer reappears —
+  because the session is TUI-occupied again. No reconnect needed.
+  The screen name is `<12-char readable id>-<6 hex of FNV-1a(full path)>`:
+  the readable part alone collides for ids sharing a 12-char prefix
+  (e.g. timestamp-style ids), and since hand-back kills any stale screen
+  of that name first, a collision would take down the *other* session's
+  TUI. The trailing `screen -X quit` makes the screen self-destruct when
+  `pi` exits, and takeover kills it again by name.
 
 ## 5. State and lifecycle
 

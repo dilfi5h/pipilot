@@ -168,11 +168,25 @@ object Occupancy {
     /**
      * Derive a screen session name for handing a session back to a TUI.
      * e.g. ".../a1b2c3d4e5f6.jsonl" -> "pipilot-back-a1b2c3d4e5f6".
+     *
+     * The readable prefix is capped, so a hash of the FULL path is appended to
+     * keep distinct sessions distinct. Without it, two sessions sharing a
+     * 12-char prefix (e.g. timestamp-style ids "2026-10-01T21-33-40" and
+     * "...T21-33-59") map to the same screen name, and since handback kills
+     * any stale screen of that name first, it would take down the *other*
+     * session's TUI.
      */
     fun handbackScreenName(sessionFile: String): String {
         val base = sessionFile.substringAfterLast('/').removeSuffix(".jsonl")
             .filter { it.isLetterOrDigit() }.take(12)
-        return "pipilot-back-" + base.ifBlank { "x" }
+        // Stable, dependency-free hash of the whole path (FNV-1a 32-bit).
+        var h = -0x7EE3623B // 2166136261
+        for (c in sessionFile) {
+            h = h xor c.code
+            h *= 16777619
+        }
+        val suffix = (h.toLong() and 0xFFFFFFFFL).toString(16).padStart(8, '0').take(6)
+        return "pipilot-back-" + (base.ifBlank { "x" } + "-" + suffix)
     }
 
     /**
