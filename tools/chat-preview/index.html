@@ -408,6 +408,13 @@
     @keyframes spin { to { transform: rotate(360deg); } }
     .takeover-btn { font-size: 12px; color: var(--cyan); background: none; border: none; cursor: pointer; padding: 4px 10px; border-radius: 6px; }
     .takeover-btn:hover { background: rgba(14,116,144,.12); }
+    /* hand-back demo */
+    .session-row { display: flex; align-items: center; gap: 8px; padding: 6px 16px; font-size: 12px; color: var(--on-variant); border-bottom: 1px solid var(--outline); background: var(--surface); }
+    .session-row .name { flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .handback-btn { font-size: 12px; color: var(--cyan); background: none; border: none; cursor: pointer; padding: 4px 10px; border-radius: 6px; }
+    .handback-btn:hover { background: rgba(14,116,144,.12); }
+    .handback-btn:disabled { color: var(--outline); cursor: default; }
+    .session-row .spinner { width: 12px; height: 12px; border: 2px solid var(--outline); border-top-color: var(--on-variant); border-radius: 50%; animation: spin .8s linear infinite; }
     .modal-mask { position: absolute; inset: 0; background: rgba(0,0,0,.45); display: flex; align-items: center; justify-content: center; z-index: 10; }
     .modal { background: var(--surface); border-radius: 14px; padding: 20px; margin: 0 36px; max-width: 300px; box-shadow: 0 8px 24px rgba(0,0,0,.3); }
     .modal h3 { margin: 0 0 8px; font-size: 15px; color: var(--on-surface); }
@@ -433,6 +440,7 @@
       <label><input type="checkbox" id="showSpeed" checked> 显示 TTFT / tok/s</label>
       <label><input type="checkbox" id="demoLive" checked> 插入流式气泡样例</label>
       <label><input type="checkbox" id="demoOccupied"> 显示 occupied 底部栏（接管按钮演示）</label>
+      <label><input type="checkbox" id="demoHandback"> 显示会话行交还按钮演示</label>
       <label><input type="checkbox" id="darkPhone"> 深色手机框（仅背景试看）</label>
       <div class="swatches">
         <span class="swatch read"><i></i>read</span>
@@ -453,6 +461,7 @@
         <li>助手气泡时间戳旁挂本条速度：<code>TTFT 1.2s · 38 tok/s</code>。首轮有 TTFT，工具后续写只留 tok/s。流式 tok/s 带 <code>~</code> 表示估算；等待首 token 时气泡只有光标、不写速度。</li>
         <li>LaTeX <b>不渲染</b>：识别出 <code>$$…$$</code> / <code>\[…\]</code> 公式块，显示原始 LaTeX + 复制按钮（复制含定界符，可直接粘到别处）；行内 <code>$…$</code> 只加等宽底色，保留原文。</li>
         <li>接管演示（勾选左侧 <code>demoOccupied</code>）：occupied 底部栏出现「接管」按钮 → 确认框（TUI 会在当前工具执行完后退出，然后由 App 接管）→ 确认后底部栏变 spinner + 「已排队，等待 TUI 本轮结束…」。TUI 空闲时直接退出的文案是「正在退出…」。点击排队状态可重置演示。</li>
+        <li>交还演示（勾选左侧 <code>demoHandback</code>）：topbar 下出现会话行，右侧「交还」按钮 → 确认框（在主机的 screen 里启动 TUI）→ 确认后变 spinner + 「正在启动 TUI…」→ 演示用 2s 后显示成功提示条（真机上不断开，底部自动变 steer）。点击成功条重置演示。</li>
       </ul>
       <p>刷新数据：<code>scp 'deb:~/.pi/agent/sessions/--root--/*.jsonl' tools/chat-preview/sessions/</code> 然后 <code>python3 tools/chat-preview/parse_sessions.py</code></p>
     </div>
@@ -466,12 +475,16 @@
           <div class="sub" id="barSub"></div>
         </div>
       </div>
+      <div class="session-row" id="handbackRow" style="display:none">
+        <span class="name">session a1b2c3d4 · 2026-10-01</span>
+        <span id="handbackSlot"></span>
+      </div>
       <div class="list" id="list"></div>
       <div class="composer">
         <div class="status-strip" id="strip"></div>
         <div class="composer-row">
-          <div class="fake-input">Message pi</div>
-          <div class="send">➤</div>
+          <div class="fake-input" id="fakeInput">Message pi</div>
+          <div class="send" id="sendBtn">➤</div>
         </div>
       </div>
     </div>
@@ -811,6 +824,7 @@
     let active = 0;
     const userExpanded = new Map();
     let occupiedDemo = "idle"; // idle | dialog | queued — takeover UI demo state
+    let handbackDemo = "idle"; // idle | dialog | working | done — hand-back UI demo state
 
     function isExpanded(key, activeDefault) {
       if (document.getElementById("expandAll").checked) return true;
@@ -959,6 +973,7 @@
       const items = withMockSpeed([...s.items, ...extras]);
       list.innerHTML = items.map(renderItem).join("") || `<div class="empty">空会话</div>`;
       renderOccupiedDemo();
+      renderHandbackRow();
       if (pinBottom) list.scrollTop = list.scrollHeight;
     }
 
@@ -989,6 +1004,47 @@
           <div class="modal-actions">
             <button class="modal-cancel" onclick="occupiedDemo='idle';render({pinBottom:false})">取消</button>
             <button class="modal-confirm" onclick="occupiedDemo='queued';render({pinBottom:false})">接管</button>
+          </div>
+        </div>`;
+        phone.appendChild(mask);
+      }
+    }
+
+    function renderHandbackRow() {
+      const row = document.getElementById("handbackRow");
+      const slot = document.getElementById("handbackSlot");
+      const phone = document.getElementById("phone");
+      phone.querySelectorAll(".modal-mask.handback").forEach(m => m.remove());
+      // Sync the composer with the hand-back state, mirroring the app:
+      // TUI-owned session -> steer mode ("Steer TUI…" + Steer button).
+      const fakeInput = document.getElementById("fakeInput");
+      const sendBtn = document.getElementById("sendBtn");
+      const steerMode = document.getElementById("demoHandback").checked && handbackDemo === "done";
+      fakeInput.textContent = steerMode ? "Steer TUI…" : "Message pi";
+      sendBtn.textContent = steerMode ? "Steer" : "➤";
+      sendBtn.style.fontSize = steerMode ? "13px" : "";
+      sendBtn.style.padding = steerMode ? "8px 12px" : "";
+      if (!document.getElementById("demoHandback").checked) { row.style.display = "none"; return; }
+      row.style.display = "flex";
+      if (handbackDemo === "working") {
+        slot.innerHTML = `<span style="display:flex;align-items:center;gap:6px;font-size:12px;color:var(--on-variant)"><span class="spinner"></span>正在启动 TUI…</span>`;
+      } else if (handbackDemo === "done") {
+        slot.innerHTML = `<span style="font-size:12px;color:var(--on-variant)" title="点击重置演示">已交还 ✓</span>`;
+        slot.style.cursor = "pointer";
+        slot.onclick = () => { handbackDemo = "idle"; slot.style.cursor = ""; slot.onclick = null; renderHandbackRow(); };
+      } else {
+        slot.innerHTML = `<button class="handback-btn" onclick="handbackDemo='dialog';renderHandbackRow()">交还</button>`;
+      }
+      if (handbackDemo === "dialog") {
+        const mask = document.createElement("div");
+        mask.className = "modal-mask handback";
+        mask.onclick = (e) => { if (e.target === mask) { handbackDemo = "idle"; renderHandbackRow(); } };
+        mask.innerHTML = `<div class="modal">
+          <h3>交还给 TUI？</h3>
+          <p>会在主机的 screen 里启动 TUI 打开当前会话（screen -r pipilot-back-… 继续），App 自动切到 steer 模式。</p>
+          <div class="modal-actions">
+            <button class="modal-cancel" onclick="handbackDemo='idle';renderHandbackRow()">取消</button>
+            <button class="modal-confirm" style="background:var(--cyan)" onclick="handbackDemo='working';renderHandbackRow();setTimeout(()=>{handbackDemo='done';renderHandbackRow()},2000)">交还</button>
           </div>
         </div>`;
         phone.appendChild(mask);
@@ -1232,6 +1288,7 @@ RMSNorm(x)
     document.getElementById("showSpeed").addEventListener("change", render);
     document.getElementById("demoLive").addEventListener("change", render);
     document.getElementById("demoOccupied").addEventListener("change", () => { occupiedDemo = "idle"; render(); });
+    document.getElementById("demoHandback").addEventListener("change", () => { handbackDemo = "idle"; render(); });
     document.getElementById("darkPhone").addEventListener("change", (e) => {
       const phone = document.getElementById("phone");
       if (e.target.checked) {

@@ -164,4 +164,28 @@ object Occupancy {
     }
 
     fun shellQuote(s: String): String = "'" + s.replace("'", "'\\''") + "'"
+
+    /**
+     * Derive a screen session name for handing a session back to a TUI.
+     * e.g. ".../a1b2c3d4e5f6.jsonl" -> "pipilot-back-a1b2c3d4e5f6".
+     */
+    fun handbackScreenName(sessionFile: String): String {
+        val base = sessionFile.substringAfterLast('/').removeSuffix(".jsonl")
+            .filter { it.isLetterOrDigit() }.take(12)
+        return "pipilot-back-" + base.ifBlank { "x" }
+    }
+
+    /**
+     * Spawn a detached screen running `pi --session <file>` so the user can
+     * reattach a TUI to this session (`pi --session` accepts a file path
+     * directly). Any stale screen with the same name is replaced.
+     * The caller polls occupancy for the new TUI record to confirm takeover.
+     */
+    fun handbackCommand(
+        sessionFile: String,
+        screenName: String = handbackScreenName(sessionFile),
+    ): String {
+        val q = shellQuote(screenName)
+        return "screen -S $q -X quit 2>/dev/null; screen -dmS $q pi --session ${shellQuote(sessionFile)}"
+    }
 }

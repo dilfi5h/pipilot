@@ -95,6 +95,8 @@ data class UiState(
     val tuiTakeover: Boolean = false,
     /** The TUI was busy; the quit is queued and fires after the current tool. */
     val tuiTakeoverQueued: Boolean = false,
+    /** Hand-back to TUI is in flight (screen spawned, waiting for its occupancy record). */
+    val handingBack: Boolean = false,
     val queueSteering: List<String> = emptyList(),
     val queueFollowUp: List<String> = emptyList(),
     /** abort/clear_queue restore unsent queue text into the composer; UI should call consumeRestoreDraft after applying. */
@@ -1247,6 +1249,57 @@ class PiViewModel(app: Application) : AndroidViewModel(app) {
                 )
             }
         }
+    }
+
+    /**
+     * Hand the current session back to a TUI: spawn `pi --session <file>` in a
+     * detached screen and wait for its occupancy record (proof the TUI owns
+     * it). The app stays connected; the UI automatically switches to steer
+     * mode for the now TUI-owned session.
+     */
+    fun handBackToTui() {
+        val path = _ui.value.state?.sessionFile ?: return
+        if (_ui.value.handingBack) return
+        viewModelScope.launch {
+            _ui.value = _ui.value.copy(handingBack = true, error = null)
+            try {
+                val screenName = Occupancy.handbackScreenName(path)
+                SshConnector.runQuick(activeSettings.value.toSshConfig(), Occupancy.handbackCommand(path, screenName))
+                var ok = false
+                val deadline = System.currentTimeMillis() + HAND_BACK_TIMEOUT_MS
+                while (System.currentTimeMillis() < deadline) {
+                    delay(1500)
+                    loadOccupancy()
+                    if (Occupancy.tuiOccupancyFor(path, _ui.value.occupancies) != null) {
+                        ok = true
+                        break
+                    }
+                }
+                if (!ok) {
+                    _ui.value = _ui.value.copy(
+                        error = "交还失败：TUI 未启动，请检查主机上的 screen",
+                        handingBack = false,
+                    )
+                    return@launch
+                }
+                AppLog.i(TAG, "handback complete: $screenName")
+                // Stay connected: the session is now TUI-owned, so the UI
+                // automatically switches to steer mode (InputBar + footer).
+                // No disconnect — the user can steer or take over again.
+                refreshState()
+                _ui.value = _ui.value.copy(
+                    handingBack = false,
+                    error = "已交还给 TUI（screen -r $screenName），下方可继续 steer",
+                )
+            } catch (e: Exception) {
+                AppLog.e(TAG, "handback FAILED: ${e.message}")
+                _ui.value = _ui.value.copy(error = "交还失败：${e.message}", handingBack = false)
+            }
+        }
+    }
+
+    companion object {
+        private const val HAND_BACK_TIMEOUT_MS = 30_000L
     }
 
     /**

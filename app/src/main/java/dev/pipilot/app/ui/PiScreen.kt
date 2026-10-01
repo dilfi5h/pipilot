@@ -251,6 +251,7 @@ fun PiScreen(viewModel: PiViewModel) {
         }
     }
     var showRename by remember { mutableStateOf(false) }
+    var showHandbackConfirm by remember { mutableStateOf(false) }
 
     LaunchedEffect(ui.error) {
         ui.error?.let {
@@ -288,19 +289,37 @@ fun PiScreen(viewModel: PiViewModel) {
                         }
                     },
                 )
-                // Session name on its own row: full width, no longer fighting top-right icons; tap to rename
+                // Session name on its own row: full width, no longer fighting top-right icons; tap to rename.
+                // The hand-back button sits at the right when the app owns the session.
                 if (ui.connected || ui.reconnecting) {
                     Surface(color = MaterialTheme.colorScheme.surface) {
-                        Text(
-                            text = sessionLabel(ui),
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            maxLines = 1,
-                            overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
-                            modifier = Modifier.fillMaxWidth()
-                                .combinedClickable(onClick = { showRename = true })
-                                .padding(horizontal = 16.dp, vertical = 4.dp),
-                        )
+                        Row(
+                            modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 2.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Text(
+                                text = sessionLabel(ui),
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                maxLines = 1,
+                                overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+                                modifier = Modifier.weight(1f)
+                                    .combinedClickable(onClick = { showRename = true })
+                                    .padding(vertical = 4.dp),
+                            )
+                            val occupied = Occupancy.isTuiOccupied(ui.state?.sessionFile, ui.occupancies)
+                            if (ui.handingBack) {
+                                CircularProgressIndicator(Modifier.size(14.dp), strokeWidth = 2.dp)
+                                Spacer(Modifier.size(6.dp))
+                                Text(
+                                    "正在启动 TUI…",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                            } else if (!occupied && ui.state?.sessionFile?.isNotBlank() == true) {
+                                TextButton(onClick = { showHandbackConfirm = true }) { Text("交还") }
+                            }
+                        }
                     }
                 }
             }
@@ -325,6 +344,23 @@ fun PiScreen(viewModel: PiViewModel) {
                 )
             }
         }
+    }
+
+    if (showHandbackConfirm) {
+        AlertDialog(
+            onDismissRequest = { showHandbackConfirm = false },
+            title = { Text("交还给 TUI？") },
+            text = { Text("会在主机的 screen 里启动 TUI 打开当前会话，App 自动切到 steer 模式。") },
+            confirmButton = {
+                TextButton(onClick = {
+                    showHandbackConfirm = false
+                    viewModel.handBackToTui()
+                }) { Text("交还") }
+            },
+            dismissButton = {
+                TextButton(onClick = { showHandbackConfirm = false }) { Text("取消") }
+            },
+        )
     }
 
     if (showSettings) {

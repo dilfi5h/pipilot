@@ -86,4 +86,23 @@ class OccupancyTest {
         // A bare OK (old steer-style ack) must not count as a quit.
         assertEquals(Occupancy.TakeoverReply.FAILED, Occupancy.parseTakeoverReply("OK\n"))
     }
+
+    @Test
+    fun handbackScreenNameDerivesFromSessionFile() {
+        assertEquals(
+            "pipilot-back-a1b2c3d4e5f6",
+            Occupancy.handbackScreenName("/root/.pi/agent/sessions/abc/a1b2c3d4e5f6.jsonl"),
+        )
+        // No session id -> fallback, still a valid screen name
+        assertEquals("pipilot-back-x", Occupancy.handbackScreenName("/tmp/.jsonl"))
+    }
+
+    @Test
+    fun handbackCommandSpawnsDetachedScreen() {
+        val cmd = Occupancy.handbackCommand("/root/.pi/agent/sessions/abc/a1b2c3d4e5f6.jsonl")
+        assertTrue(cmd.contains("screen -dmS 'pipilot-back-a1b2c3d4e5f6'"))
+        assertTrue(cmd.contains("pi --session '/root/.pi/agent/sessions/abc/a1b2c3d4e5f6.jsonl'"))
+        // Replaces a stale screen with the same name
+        assertTrue(cmd.contains("screen -S 'pipilot-back-a1b2c3d4e5f6' -X quit"))
+    }
 }
