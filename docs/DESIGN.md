@@ -229,6 +229,15 @@ etc.) only surface extension errors in the MVP and are not modeled one-by-one.
   the option — the reply was silently lost (blank reply → "no response")
   while the TUI still exited. The bridge shuts down after the client
   disconnects (proving it got the reply), with a short fallback timer.
+- **Hand back**: the reverse of takeover. When the app owns a session, the
+  session row offers 交还 (behind a confirmation dialog). It SSH-runs
+  `screen -dmS pipilot-back-<id> pi --session <file>` (`pi --session`
+  accepts a file path directly; a stale screen with the same name is
+  replaced first), then polls occupancy for the new TUI record (30s
+  timeout). Once the TUI owns the session the app stays connected and
+  the UI automatically switches to steer mode — the InputBar shows
+  "Steer TUI…" and the occupied footer reappears — because the session
+  is TUI-occupied again. No reconnect needed.
 
 ## 5. State and lifecycle
 
@@ -238,6 +247,9 @@ etc.) only surface extension errors in the MVP and are not modeled one-by-one.
   down the old SSH immediately, then exponential-backoff reconnect (2s→30s).
   During reconnect the UI keeps the chat list + banner; on success resume with
   `pi --mode rpc --session <path>` and rebuild history fully via `get_entries`.
+  Manual connect also resumes the last session file (persisted in DataStore, so
+  it survives app restarts); only "New session" starts fresh and clears the
+  resume target. The session list sheet remains available for manual switching.
   **A reconnect must not disturb what the user is reading:** the list is never
   blanked (only rows that were mid-flight when the socket died — the live bubble,
   half-run tool cards, streaming bash — are dropped), and the rebuild does not

@@ -95,6 +95,8 @@ data class UiState(
     val tuiTakeover: Boolean = false,
     /** The TUI was busy; the quit is queued and fires after the current tool. */
     val tuiTakeoverQueued: Boolean = false,
+    /** Hand-back to TUI is in flight (screen spawned, waiting for its occupancy record). */
+    val handingBack: Boolean = false,
     val queueSteering: List<String> = emptyList(),
     val queueFollowUp: List<String> = emptyList(),
     /** abort/clear_queue restore unsent queue text into the composer; UI should call consumeRestoreDraft after applying. */
@@ -193,6 +195,7 @@ class PiViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     init {
+        viewModelScope.launch { lastSessionFile = settingsStore.loadLastSession() }
         runCatching { connectivity?.registerDefaultNetworkCallback(networkCallback) }
             .onSuccess {
                 AppLog.i(TAG, "network watch registered")
@@ -204,9 +207,15 @@ class PiViewModel(app: Application) : AndroidViewModel(app) {
     private var client: PiRpcClient? = null
     private val reducer = StreamReducer()
 
-    // Last connected session file; after a successful reconnect resume with `pi --mode rpc --session <path>`
-    // so we do not lose context (a fresh pi process starts an empty session)
+    // Last connected session file; connect (manual or reconnect) resumes with
+    // `pi --mode rpc --session <path>` so we do not lose context (a fresh pi
+    // process starts an empty session). Persisted so it survives app restarts.
     private var lastSessionFile: String? = null
+
+    private fun setLastSessionFile(path: String?) {
+        lastSessionFile = path
+        viewModelScope.launch { settingsStore.saveLastSession(path) }
+    }
     /** Last append-only entry id synced for the current session. */
     private var lastEntryId: String? = null
     /** Last assistant entry in the most recently loaded on-disk history. */
@@ -269,8 +278,10 @@ class PiViewModel(app: Application) : AndroidViewModel(app) {
         }
         return try {
             val cd = if (s.workDir.isNotBlank()) "cd ${shellQuote(s.workDir)} && " else ""
-            // On reconnect (resetItems=false) start with the last session path to resume; manual connect always starts fresh
-            val resumeArg = if (!resetItems) lastSessionFile?.let { " --session ${shellQuote(it)}" } ?: "" else ""
+            // Resume the last session when we have one (manual connect and
+            // reconnect alike); a fresh session is only started explicitly via
+            // "New session", which clears lastSessionFile.
+            val resumeArg = lastSessionFile?.let { " --session ${shellQuote(it)}" } ?: ""
             val exec = SshConnector.connectAndExec(
                 SshConfig(s.host, s.port.toIntOrNull() ?: 22, s.user, auth),
                 "${cd}${s.piCommand}$resumeArg",
@@ -313,7 +324,8 @@ class PiViewModel(app: Application) : AndroidViewModel(app) {
                 // Same for the rebuild below: no historyEpoch bump, so ChatList keeps the
                 // user's scroll position instead of yanking them to the bottom.
                 refreshAll(pinToBottom = resetItems)
-                AppLog.i(TAG, "connect ok${if (!resetItems) " (resumed $lastSessionFile)" else ""}")
+                val resumed = lastSessionFile?.let { " (resumed $it)" } ?: ""
+                AppLog.i(TAG, "connect ok$resumed")
                 true
             } catch (inner: Exception) {
                 runCatching { rpc.close(notify = false) }
@@ -726,7 +738,7 @@ class PiViewModel(app: Application) : AndroidViewModel(app) {
             if (resp?.success == true) {
                 AppLog.i(TAG, "new_session ok, cancelled=${resp.data?.get("cancelled")}")
                 // After a new session, clear the resume target: a later reconnect should stay on the new session, not jump back
-                lastSessionFile = null
+                setLastSessionFile(null)
                 lastEntryId = null
                 lastAssistantEntryId = null
                 tuiSteerBaselineAssistantId = null
@@ -870,7 +882,7 @@ class PiViewModel(app: Application) : AndroidViewModel(app) {
         if (resp?.success == true && resp.data != null) {
             val state = PiState.from(JsonObject(mapOf("data" to resp.data!!)))
             // Remember the current session file so a reconnect can resume with --session
-            state.sessionFile?.takeIf { it.isNotBlank() }?.let { lastSessionFile = it }
+            state.sessionFile?.takeIf { it.isNotBlank() }?.let { setLastSessionFile(it) }
             locallyStreaming = state.isStreaming
             _ui.value = _ui.value.copy(state = state)
             // Also refresh thinking levels
@@ -1117,7 +1129,7 @@ class PiViewModel(app: Application) : AndroidViewModel(app) {
             val line = PiCommands.switchSession(path)
             val resp = client?.request(line, extractId(line) ?: return@launch)
             if (resp?.success == true) {
-                lastSessionFile = path
+                setLastSessionFile(path)
                 lastEntryId = null
                 lastAssistantEntryId = null
                 tuiSteerBaselineAssistantId = null
@@ -1154,7 +1166,7 @@ class PiViewModel(app: Application) : AndroidViewModel(app) {
                     )
                     return@launch
                 }
-                lastSessionFile = path
+                setLastSessionFile(path)
                 lastEntryId = null
                 loadHistory(pinToBottom = true)
                 val stillPending = steeringPendingAfterRefresh(
@@ -1233,9 +1245,19 @@ class PiViewModel(app: Application) : AndroidViewModel(app) {
                     )
                     return@launch
                 }
-                lastSessionFile = path
+                setLastSessionFile(path)
                 lastEntryId = null
                 loadHistory(pinToBottom = true)
+                // The TUI is gone; make sure its screen goes too. Only touches
+                // screens we created (pipilot-back-*); user-owned screens are
+                // left alone. Best-effort: the hand-back screen also
+                // self-destructs when pi exits.
+                runCatching {
+                    SshConnector.runQuick(
+                        activeSettings.value.toSshConfig(),
+                        Occupancy.killHandbackScreenCommand(Occupancy.handbackScreenName(path)),
+                    )
+                }
                 _ui.value = _ui.value.copy(tuiTakeover = false, tuiTakeoverQueued = false)
                 AppLog.i(TAG, "takeover complete: $path")
             } catch (e: Exception) {
@@ -1247,6 +1269,57 @@ class PiViewModel(app: Application) : AndroidViewModel(app) {
                 )
             }
         }
+    }
+
+    /**
+     * Hand the current session back to a TUI: spawn `pi --session <file>` in a
+     * detached screen and wait for its occupancy record (proof the TUI owns
+     * it). The app stays connected; the UI automatically switches to steer
+     * mode for the now TUI-owned session.
+     */
+    fun handBackToTui() {
+        val path = _ui.value.state?.sessionFile ?: return
+        if (_ui.value.handingBack) return
+        viewModelScope.launch {
+            _ui.value = _ui.value.copy(handingBack = true, error = null)
+            try {
+                val screenName = Occupancy.handbackScreenName(path)
+                SshConnector.runQuick(activeSettings.value.toSshConfig(), Occupancy.handbackCommand(path, screenName))
+                var ok = false
+                val deadline = System.currentTimeMillis() + HAND_BACK_TIMEOUT_MS
+                while (System.currentTimeMillis() < deadline) {
+                    delay(1500)
+                    loadOccupancy()
+                    if (Occupancy.tuiOccupancyFor(path, _ui.value.occupancies) != null) {
+                        ok = true
+                        break
+                    }
+                }
+                if (!ok) {
+                    _ui.value = _ui.value.copy(
+                        error = "交还失败：TUI 未启动，请检查主机上的 screen",
+                        handingBack = false,
+                    )
+                    return@launch
+                }
+                AppLog.i(TAG, "handback complete: $screenName")
+                // Stay connected: the session is now TUI-owned, so the UI
+                // automatically switches to steer mode (InputBar + footer).
+                // No disconnect — the user can steer or take over again.
+                refreshState()
+                _ui.value = _ui.value.copy(
+                    handingBack = false,
+                    error = "已交还给 TUI（screen -r $screenName），下方可继续 steer",
+                )
+            } catch (e: Exception) {
+                AppLog.e(TAG, "handback FAILED: ${e.message}")
+                _ui.value = _ui.value.copy(error = "交还失败：${e.message}", handingBack = false)
+            }
+        }
+    }
+
+    companion object {
+        private const val HAND_BACK_TIMEOUT_MS = 30_000L
     }
 
     /**
