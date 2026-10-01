@@ -1248,6 +1248,16 @@ class PiViewModel(app: Application) : AndroidViewModel(app) {
                 setLastSessionFile(path)
                 lastEntryId = null
                 loadHistory(pinToBottom = true)
+                // The TUI is gone; make sure its screen goes too. Only touches
+                // screens we created (pipilot-back-*); user-owned screens are
+                // left alone. Best-effort: the hand-back screen also
+                // self-destructs when pi exits.
+                runCatching {
+                    SshConnector.runQuick(
+                        activeSettings.value.toSshConfig(),
+                        Occupancy.killHandbackScreenCommand(Occupancy.handbackScreenName(path)),
+                    )
+                }
                 _ui.value = _ui.value.copy(tuiTakeover = false, tuiTakeoverQueued = false)
                 AppLog.i(TAG, "takeover complete: $path")
             } catch (e: Exception) {

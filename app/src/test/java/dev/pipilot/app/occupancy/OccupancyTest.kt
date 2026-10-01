@@ -104,5 +104,13 @@ class OccupancyTest {
         assertTrue(cmd.contains("pi --session '/root/.pi/agent/sessions/abc/a1b2c3d4e5f6.jsonl'"))
         // Replaces a stale screen with the same name
         assertTrue(cmd.contains("screen -S 'pipilot-back-a1b2c3d4e5f6' -X quit"))
+        // Self-destructs when pi exits so takeover leaves no stale screen
+        assertTrue(cmd.contains("screen -X quit"))
+    }
+
+    @Test
+    fun killHandbackScreenCommandTargetsOnlyOurs() {
+        val cmd = Occupancy.killHandbackScreenCommand("pipilot-back-a1b2c3d4e5f6")
+        assertTrue(cmd.contains("screen -S 'pipilot-back-a1b2c3d4e5f6' -X quit"))
     }
 }
