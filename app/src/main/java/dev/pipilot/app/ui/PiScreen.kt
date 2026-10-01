@@ -320,6 +320,7 @@ fun PiScreen(viewModel: PiViewModel) {
                     ui,
                     onClearQueue = viewModel::clearQueueToEditor,
                     onRefreshOccupied = viewModel::refreshOccupiedHistory,
+                    onTakeover = viewModel::takeoverOccupiedSession,
                     modifier = Modifier.weight(1f),
                 )
             }
@@ -474,6 +475,7 @@ private fun ChatList(
     ui: UiState,
     onClearQueue: () -> Unit,
     onRefreshOccupied: () -> Unit,
+    onTakeover: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val listState = rememberLazyListState()
@@ -487,6 +489,7 @@ private fun ChatList(
     val pinningBottom = remember { mutableStateOf(false) }
     val jumpScope = rememberCoroutineScope()
     var occupiedPullPx by remember { mutableStateOf(0f) }
+    var showTakeoverConfirm by remember { mutableStateOf(false) }
     val refreshPullThresholdPx = with(LocalDensity.current) { 72.dp.toPx() }
     val occupiedRefreshGesture = if (tuiOccupied) {
         Modifier.pointerInput(tuiOccupied, ui.tuiRefreshing, lastListIndex, refreshPullThresholdPx) {
@@ -606,12 +609,14 @@ private fun ChatList(
                         horizontalArrangement = Arrangement.Center,
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
-                        if (ui.tuiRefreshing || ui.tuiSteering) {
+                        if (ui.tuiRefreshing || ui.tuiSteering || ui.tuiTakeover) {
                             CircularProgressIndicator(Modifier.size(14.dp), strokeWidth = 2.dp)
                             Spacer(Modifier.size(6.dp))
                         }
                         Text(
                             when {
+                                ui.tuiTakeover && ui.tuiTakeoverQueued -> "已排队，等待 TUI 本轮结束…"
+                                ui.tuiTakeover -> "正在退出…"
                                 ui.tuiRefreshing -> "Refreshing…"
                                 ui.tuiSteering -> "Steering… pull up at bottom to refresh"
                                 occupiedPullPx > 0f -> "Pull up to refresh"
@@ -620,6 +625,12 @@ private fun ChatList(
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
+                        if (!ui.tuiTakeover) {
+                            TextButton(
+                                onClick = { showTakeoverConfirm = true },
+                                enabled = !ui.tuiRefreshing && !ui.tuiSteering,
+                            ) { Text("接管") }
+                        }
                     }
                 }
             }
@@ -640,6 +651,22 @@ private fun ChatList(
                 Icon(Icons.Filled.KeyboardArrowDown, "Scroll to bottom")
             }
         }
+    }
+    if (showTakeoverConfirm) {
+        AlertDialog(
+            onDismissRequest = { showTakeoverConfirm = false },
+            title = { Text("接管这个会话？") },
+            text = { Text("TUI 会在当前工具执行完后退出，然后由 App 接管。") },
+            confirmButton = {
+                TextButton(onClick = {
+                    showTakeoverConfirm = false
+                    onTakeover()
+                }) { Text("接管") }
+            },
+            dismissButton = {
+                TextButton(onClick = { showTakeoverConfirm = false }) { Text("取消") }
+            },
+        )
     }
 }
 

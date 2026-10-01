@@ -207,6 +207,21 @@ etc.) only surface extension errors in the MVP and are not modeled one-by-one.
   newly persisted TUI output. Pulling downward remains ordinary navigation to
   older messages. `Steering…` clears after a refresh observes a newer assistant
   entry than the one visible when the steer was sent.
+- **Takeover**: the occupied banner also offers Take over (behind a
+  confirmation dialog: "the TUI quits after the current tool finishes, then
+  the app takes over"). It writes `{source:pipilot,command:"quit"}` to the
+  TUI's inbox socket. The bridge treats quit like a steer, not a kill: if the
+  agent is idle it calls `ctx.shutdown()` immediately; if a turn is running it
+  queues the quit and shuts down at the next `tool_result` — after the current
+  tool, before the next LLM call — with `agent_settled` as the fallback for
+  turns that end without another tool. The bridge replies `OK:quit` for the
+  immediate path and `OK:queued` for the deferred one. The app then polls
+  occupancy until the record disappears (longer timeout when queued; on
+  timeout it reports the quit is queued and the TUI will exit when its turn
+  settles — the queue lives in the TUI process, so nothing is lost), then
+  `switch_session` to that file and becomes the owner. Shutdown is orderly,
+  so the session jsonl is flushed and the app continues from the last
+  completed tool.
 
 ## 5. State and lifecycle
 

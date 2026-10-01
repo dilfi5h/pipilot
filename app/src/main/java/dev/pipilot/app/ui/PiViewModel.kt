@@ -91,6 +91,10 @@ data class UiState(
     val tuiSteering: Boolean = false,
     /** Manual bottom-pull reload of a TUI-owned session is in progress. */
     val tuiRefreshing: Boolean = false,
+    /** Takeover of a TUI-occupied session is in flight (quit sent, waiting for the TUI to exit). */
+    val tuiTakeover: Boolean = false,
+    /** The TUI was busy; the quit is queued and fires after the current tool. */
+    val tuiTakeoverQueued: Boolean = false,
     val queueSteering: List<String> = emptyList(),
     val queueFollowUp: List<String> = emptyList(),
     /** abort/clear_queue restore unsent queue text into the composer; UI should call consumeRestoreDraft after applying. */
@@ -123,6 +127,12 @@ internal fun steeringPendingAfterRefresh(
     baselineAssistantId: String?,
     latestAssistantId: String?,
 ): Boolean = pending && (latestAssistantId == null || latestAssistantId == baselineAssistantId)
+
+/**
+ * Poll budget while waiting for a TUI to exit after a takeover quit.
+ * Queued quits wait longer: the TUI finishes its current tool first.
+ */
+internal fun takeoverTimeoutMs(queued: Boolean): Long = if (queued) 90_000 else 15_000
 
 class PiViewModel(app: Application) : AndroidViewModel(app) {
 
@@ -1160,6 +1170,81 @@ class PiViewModel(app: Application) : AndroidViewModel(app) {
                 _ui.value = _ui.value.copy(error = "Refresh failed: ${e.message}")
             } finally {
                 _ui.value = _ui.value.copy(tuiRefreshing = false)
+            }
+        }
+    }
+
+    /**
+     * Ask the TUI owning the current session to quit (pipilot-bridge inbox
+     * `command:"quit"`), then take over the session once its occupancy record
+     * disappears. Like a steer, the quit lands after the current tool, before
+     * the next LLM call — never mid-tool. The phone RPC then switch_session's
+     * to the file and becomes the owner.
+     */
+    fun takeoverOccupiedSession() {
+        val path = _ui.value.state?.sessionFile ?: return
+        val inbox = Occupancy.tuiOccupancyFor(path, _ui.value.occupancies)?.inbox
+        if (inbox.isNullOrBlank() || _ui.value.tuiTakeover) return
+        viewModelScope.launch {
+            _ui.value = _ui.value.copy(tuiTakeover = true, tuiTakeoverQueued = false)
+            try {
+                val out = SshConnector.runQuick(activeSettings.value.toSshConfig(), Occupancy.takeoverCommand(inbox))
+                when (Occupancy.parseTakeoverReply(out)) {
+                    Occupancy.TakeoverReply.FAILED -> {
+                        _ui.value = _ui.value.copy(
+                            error = "Takeover failed: ${out.ifBlank { "no response" }}",
+                            tuiTakeover = false,
+                        )
+                        return@launch
+                    }
+                    Occupancy.TakeoverReply.QUEUED ->
+                        _ui.value = _ui.value.copy(tuiTakeoverQueued = true)
+                    Occupancy.TakeoverReply.QUIT_NOW -> Unit
+                }
+                val queued = _ui.value.tuiTakeoverQueued
+                val deadline = System.currentTimeMillis() + takeoverTimeoutMs(queued)
+                var gone = false
+                while (System.currentTimeMillis() < deadline) {
+                    delay(1500)
+                    loadOccupancy()
+                    if (Occupancy.tuiOccupancyFor(path, _ui.value.occupancies) == null) {
+                        gone = true
+                        break
+                    }
+                }
+                if (!gone) {
+                    _ui.value = _ui.value.copy(
+                        error = if (queued) "TUI 仍在运行，quit 已排队，稍后下拉刷新查看"
+                        else "Takeover timed out",
+                        tuiTakeover = false,
+                        tuiTakeoverQueued = false,
+                    )
+                    return@launch
+                }
+                val rpc = client ?: return@launch
+                val line = PiCommands.switchSession(path)
+                val resp = rpc.request(line, extractId(line) ?: return@launch)
+                val cancelled = resp?.data?.get("cancelled")?.jsonPrimitive?.contentOrNull == "true"
+                if (resp?.success != true || cancelled) {
+                    _ui.value = _ui.value.copy(
+                        error = if (cancelled) "Takeover cancelled by pi" else "Takeover failed: ${resp?.error ?: "no response"}",
+                        tuiTakeover = false,
+                        tuiTakeoverQueued = false,
+                    )
+                    return@launch
+                }
+                lastSessionFile = path
+                lastEntryId = null
+                loadHistory(pinToBottom = true)
+                _ui.value = _ui.value.copy(tuiTakeover = false, tuiTakeoverQueued = false)
+                AppLog.i(TAG, "takeover complete: $path")
+            } catch (e: Exception) {
+                AppLog.e(TAG, "takeover FAILED: ${e.message}")
+                _ui.value = _ui.value.copy(
+                    error = "Takeover failed: ${e.message}",
+                    tuiTakeover = false,
+                    tuiTakeoverQueued = false,
+                )
             }
         }
     }

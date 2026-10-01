@@ -38,6 +38,19 @@ python3 -c 'import json,os,socket,sys; p=sys.argv[1]; b=json.dumps({"source":"pi
 JSON `{source?, pid?, text}` or plain text, 16 KB cap. Idle → immediately starts
 a turn. Streaming → **steer** (after the current tool, before the next LLM call).
 
+Ask the TUI to quit so a remote client can take over the session:
+
+```bash
+python3 -c 'import json,socket,sys; p=sys.argv[1]; b=json.dumps({"source":"pipilot","command":"quit"}).encode(); s=socket.socket(socket.AF_UNIX); s.connect(p); s.sendall(b); s.shutdown(socket.SHUT_WR); print(s.makefile().readline().strip()); s.close()' "$INBOX"
+```
+
+Like a steer, quit is not abrupt: idle → `ctx.shutdown()` now (replies
+`OK:quit`); busy → queued, shutdown at the next `tool_result` (after the
+current tool, before the next LLM call), `agent_settled` as fallback (replies
+`OK:queued`). Shutdown is orderly, so the occupancy file is removed and the
+session jsonl is flushed; a client can poll the dump until the record
+disappears and then `switch_session` to take over.
+
 `kill -9` can leave JSON + a dead socket. `discover.py` skips a record unless
 that pid is still alive **and** cmdline still looks like pi, then deletes the
 stale files. Leftover files are not locks.
