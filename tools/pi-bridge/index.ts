@@ -146,14 +146,24 @@ export default function (pi: ExtensionAPI) {
     mkdirSync(dir, { recursive: true, mode: 0o700 });
     const path = join(dir, `${process.pid}.sock`);
     rmSync(path, { force: true });
-    server = createServer(async (conn) => {
-      const [pid, raw] = await Promise.all([peerPid(conn), text(conn).catch(() => "")]);
+    // allowHalfOpen: clients half-close (SHUT_WR) after sending, then read our
+    // one-line reply. With the default (false) the socket dies on the client's
+    // FIN, so conn.end(reply) in handleQuit writes to a dead socket and the
+    // app sees a blank reply ("no response"). Steer never noticed: it needs
+    // no reply. Non-quit paths close the socket explicitly below.
+    server = createServer({ allowHalfOpen: true }, async (conn) => {
+      conn.on("error", () => {});
+      const raw = await text(conn).catch(() => "");
       const ev = parse(raw.slice(0, MAX_BYTES));
       if (ev.command === "quit") {
         handleQuit(conn);
         return;
       }
-      if (!ev.text) return;
+      if (!ev.text) {
+        conn.end();
+        return;
+      }
+      const pid = await peerPid(conn).catch(() => undefined);
       ev.pid ??= pid;
       const tag = [ev.source, ev.pid && `pid ${ev.pid}`].filter(Boolean).join(" ");
       const header = tag ? `[inbox: ${tag}]` : "[inbox]";
@@ -161,6 +171,7 @@ export default function (pi: ExtensionAPI) {
         { customType: "inbox", content: `${header}\n${ev.text}`, display: true, details: ev },
         { deliverAs: "steer", triggerTurn: true },
       );
+      conn.end();
     });
     server.listen(path);
     inboxPath = path;

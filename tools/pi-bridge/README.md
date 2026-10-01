@@ -51,6 +51,11 @@ current tool, before the next LLM call), `agent_settled` as fallback (replies
 session jsonl is flushed; a client can poll the dump until the record
 disappears and then `switch_session` to take over.
 
+Protocol pitfall: clients send then half-close (`SHUT_WR`) and read the
+one-line reply, so the server runs with `allowHalfOpen: true`. With the
+default (`false`) the socket dies on the client's FIN and the quit reply
+never reaches the client (app sees a blank reply).
+
 `kill -9` can leave JSON + a dead socket. `discover.py` skips a record unless
 that pid is still alive **and** cmdline still looks like pi, then deletes the
 stale files. Leftover files are not locks.
