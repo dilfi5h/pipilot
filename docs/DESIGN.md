@@ -221,10 +221,14 @@ etc.) only surface extension errors in the MVP and are not modeled one-by-one.
   settles — the queue lives in the TUI process, so nothing is lost), then
   `switch_session` to that file and becomes the owner. Shutdown is orderly,
   so the session jsonl is flushed and the app continues from the last
-  completed tool. Socket pitfall: clients half-close (`SHUT_WR`) after
-  sending and read a one-line reply, so the bridge inbox server must run
-  with `allowHalfOpen: true` — otherwise the socket dies on the client's
-  FIN and the quit reply never arrives (blank reply → "no response").
+  completed tool. Socket pitfall: the quit client sends the JSON command
+  and reads the one-line reply WITHOUT half-closing first (it closes after
+  reading), so the bridge always writes the reply on a fully-open socket.
+  An earlier design had the client half-close and the server reply with
+  `allowHalfOpen: true`, but some runtimes destroy the socket on FIN despite
+  the option — the reply was silently lost (blank reply → "no response")
+  while the TUI still exited. The bridge shuts down after the client
+  disconnects (proving it got the reply), with a short fallback timer.
 
 ## 5. State and lifecycle
 

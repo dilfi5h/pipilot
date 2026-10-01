@@ -72,6 +72,9 @@ class OccupancyTest {
         assertTrue(cmd.contains("quit"))
         // The bridge replies on the connection; the client must read it back.
         assertTrue(cmd.contains("readline"))
+        // No half-close: the bridge writes the reply on the still-open socket
+        // (half-close + allowHalfOpen reply is unreliable on some runtimes).
+        assertFalse(cmd.contains("SHUT_WR"))
     }
 
     @Test

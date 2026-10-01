@@ -143,15 +143,21 @@ object Occupancy {
 
     /**
      * Remote quit: send {"source":"pipilot","command":"quit"} to the inbox socket,
-     * then read the bridge's one-line reply ("OK:quit" / "OK:queued"). The socket
-     * timeout guards against old bridges that never reply (runQuick has its own
-     * 15s timeout as the outer bound).
+     * then read the bridge's one-line reply ("OK:quit" / "OK:queued").
+     *
+     * The client deliberately does NOT half-close (SHUT_WR) before reading:
+     * the bridge replies on the still-open socket, which works on every
+     * runtime (half-close + allowHalfOpen reply proved unreliable — some
+     * runtimes destroy the socket on FIN, so the reply was silently lost
+     * while the TUI still exited). The socket timeout guards against old
+     * bridges that never reply (runQuick has its own 15s timeout as the
+     * outer bound).
      */
     fun takeoverCommand(inboxPath: String): String {
         val py =
             "import json,socket,sys; p=sys.argv[1]; " +
                 "b=json.dumps({\"source\":\"pipilot\",\"command\":\"quit\"}).encode(); " +
-                "s=socket.socket(socket.AF_UNIX); s.settimeout(10); s.connect(p); s.sendall(b); s.shutdown(socket.SHUT_WR)\n" +
+                "s=socket.socket(socket.AF_UNIX); s.settimeout(10); s.connect(p); s.sendall(b)\n" +
                 "try:\n print(s.makefile().readline().strip())\nexcept Exception:\n print(\"ERR:timeout\")\n" +
                 "s.close()"
         return "python3 -c ${shellQuote(py)} ${shellQuote(inboxPath)}"

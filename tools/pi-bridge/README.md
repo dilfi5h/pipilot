@@ -41,7 +41,7 @@ a turn. Streaming → **steer** (after the current tool, before the next LLM cal
 Ask the TUI to quit so a remote client can take over the session:
 
 ```bash
-python3 -c 'import json,socket,sys; p=sys.argv[1]; b=json.dumps({"source":"pipilot","command":"quit"}).encode(); s=socket.socket(socket.AF_UNIX); s.connect(p); s.sendall(b); s.shutdown(socket.SHUT_WR); print(s.makefile().readline().strip()); s.close()' "$INBOX"
+python3 -c 'import json,socket,sys; p=sys.argv[1]; b=json.dumps({"source":"pipilot","command":"quit"}).encode(); s=socket.socket(socket.AF_UNIX); s.connect(p); s.sendall(b); print(s.makefile().readline().strip()); s.close()' "$INBOX"
 ```
 
 Like a steer, quit is not abrupt: idle → `ctx.shutdown()` now (replies
@@ -51,10 +51,13 @@ current tool, before the next LLM call), `agent_settled` as fallback (replies
 session jsonl is flushed; a client can poll the dump until the record
 disappears and then `switch_session` to take over.
 
-Protocol pitfall: clients send then half-close (`SHUT_WR`) and read the
-one-line reply, so the server runs with `allowHalfOpen: true`. With the
-default (`false`) the socket dies on the client's FIN and the quit reply
-never reaches the client (app sees a blank reply).
+Protocol pitfall: the quit client sends the JSON command and reads the
+one-line reply WITHOUT half-closing first (it closes after reading), so the
+server always writes the reply on a fully-open socket. An earlier design had
+the client half-close and the server reply with `allowHalfOpen: true`, but
+some runtimes destroy the socket on FIN despite the option — the quit reply
+was silently lost (blank reply) while the TUI still exited. `allowHalfOpen`
+stays on as a harmless fallback for old half-closing clients.
 
 `kill -9` can leave JSON + a dead socket. `discover.py` skips a record unless
 that pid is still alive **and** cmdline still looks like pi, then deletes the

@@ -15,6 +15,17 @@
  *   fallback. Replies "OK:quit" / "OK:queued" / "ERR:no-session" on the
  *   connection before closing it.
  *
+ * Reply protocol (deliberately NOT half-close): the client sends the JSON
+ *   command and then reads the one-line reply WITHOUT shutting down its
+ *   write side first; it closes only after reading. The server therefore
+ *   always writes the reply on a fully-open socket, which works on every
+ *   runtime. (An earlier design had the client half-close and the server
+ *   reply with allowHalfOpen:true — but some runtimes destroy the socket on
+ *   FIN despite the option, so conn.end(reply) silently wrote to a dead
+ *   socket and the client saw a blank reply while the TUI still exited.)
+ *   The server shuts down after the client disconnects (i.e. it has the
+ *   reply), with a short fallback timer in case it never does.
+ *
  * Socket follows the process. Occupancy file follows the current jsonl.
  * Do not start the socket in the factory (pi may load extensions without a session).
  *
@@ -25,7 +36,6 @@ import { spawn } from "node:child_process";
 import { mkdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { createServer, type Server, type Socket } from "node:net";
 import { basename, join } from "node:path";
-import { text } from "node:stream/consumers";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 
@@ -118,6 +128,45 @@ function parse(raw: string): InboxEvent {
   return { text: raw.trim() };
 }
 
+/**
+ * Read one command from the connection.
+ *
+ * The client sends a single small JSON object and then waits for our
+ * one-line reply WITHOUT half-closing first (it closes after reading), so
+ * we cannot wait for EOF: resolve as soon as the buffer holds a complete
+ * JSON object. EOF / error / a short idle timeout resolve with whatever we
+ * have (covers old half-closing clients and plain-text probes).
+ */
+function readCommand(conn: Socket): Promise<string> {
+  return new Promise((resolve) => {
+    let buf = "";
+    let done = false;
+    const finish = (v: string) => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      conn.off("data", onData);
+      resolve(v);
+    };
+    // Don't wait forever on a client that trickles data and never closes.
+    const timer = setTimeout(() => finish(buf), 1500);
+    const onData = (d: Buffer) => {
+      buf += d.toString("utf8");
+      if (buf.length > MAX_BYTES) return finish(buf.slice(0, MAX_BYTES));
+      try {
+        JSON.parse(buf);
+        finish(buf); // complete JSON object: we have the whole command
+      } catch {
+        /* need more data */
+      }
+    };
+    conn.on("data", onData);
+    conn.once("end", () => finish(buf));
+    conn.once("error", () => finish(buf));
+    conn.once("close", () => finish(buf));
+  });
+}
+
 export default function (pi: ExtensionAPI) {
   let server: Server | undefined;
   let inboxPath: string | null = null;
@@ -146,14 +195,11 @@ export default function (pi: ExtensionAPI) {
     mkdirSync(dir, { recursive: true, mode: 0o700 });
     const path = join(dir, `${process.pid}.sock`);
     rmSync(path, { force: true });
-    // allowHalfOpen: clients half-close (SHUT_WR) after sending, then read our
-    // one-line reply. With the default (false) the socket dies on the client's
-    // FIN, so conn.end(reply) in handleQuit writes to a dead socket and the
-    // app sees a blank reply ("no response"). Steer never noticed: it needs
-    // no reply. Non-quit paths close the socket explicitly below.
+    // allowHalfOpen stays on: harmless, and lets old half-closing clients
+    // still deliver their command (the reply path no longer depends on it).
     server = createServer({ allowHalfOpen: true }, async (conn) => {
       conn.on("error", () => {});
-      const raw = await text(conn).catch(() => "");
+      const raw = await readCommand(conn).catch(() => "");
       const ev = parse(raw.slice(0, MAX_BYTES));
       if (ev.command === "quit") {
         handleQuit(conn);
@@ -209,13 +255,27 @@ export default function (pi: ExtensionAPI) {
         shutdownNow = true;
       }
     }
-    conn.end(reply + "\n", () => {
-      if (shutdownNow) {
-        try {
-          void requestShutdown?.();
-        } catch {}
-      }
-    });
+    // The client reads this reply on the still-open socket and then closes.
+    // Shut down once it disconnects — that proves it has the reply — with a
+    // fallback timer in case it never disconnects. Never shut down from the
+    // end() callback: on some runtimes the callback fires even when the
+    // write went nowhere, which would exit the TUI while the client waits.
+    let done = false;
+    const doShutdown = () => {
+      if (done || !shutdownNow) return;
+      done = true;
+      clearTimeout(fallback);
+      try {
+        void requestShutdown?.();
+      } catch {}
+    };
+    const fallback = setTimeout(doShutdown, 3000);
+    conn.once("close", doShutdown);
+    try {
+      conn.end(reply + "\n");
+    } catch {
+      doShutdown();
+    }
   };
 
   const publish = (ctx: Parameters<typeof snapshot>[0]) => {
