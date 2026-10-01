@@ -195,6 +195,7 @@ class PiViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     init {
+        viewModelScope.launch { lastSessionFile = settingsStore.loadLastSession() }
         runCatching { connectivity?.registerDefaultNetworkCallback(networkCallback) }
             .onSuccess {
                 AppLog.i(TAG, "network watch registered")
@@ -206,9 +207,15 @@ class PiViewModel(app: Application) : AndroidViewModel(app) {
     private var client: PiRpcClient? = null
     private val reducer = StreamReducer()
 
-    // Last connected session file; after a successful reconnect resume with `pi --mode rpc --session <path>`
-    // so we do not lose context (a fresh pi process starts an empty session)
+    // Last connected session file; connect (manual or reconnect) resumes with
+    // `pi --mode rpc --session <path>` so we do not lose context (a fresh pi
+    // process starts an empty session). Persisted so it survives app restarts.
     private var lastSessionFile: String? = null
+
+    private fun setLastSessionFile(path: String?) {
+        lastSessionFile = path
+        viewModelScope.launch { settingsStore.saveLastSession(path) }
+    }
     /** Last append-only entry id synced for the current session. */
     private var lastEntryId: String? = null
     /** Last assistant entry in the most recently loaded on-disk history. */
@@ -271,8 +278,10 @@ class PiViewModel(app: Application) : AndroidViewModel(app) {
         }
         return try {
             val cd = if (s.workDir.isNotBlank()) "cd ${shellQuote(s.workDir)} && " else ""
-            // On reconnect (resetItems=false) start with the last session path to resume; manual connect always starts fresh
-            val resumeArg = if (!resetItems) lastSessionFile?.let { " --session ${shellQuote(it)}" } ?: "" else ""
+            // Resume the last session when we have one (manual connect and
+            // reconnect alike); a fresh session is only started explicitly via
+            // "New session", which clears lastSessionFile.
+            val resumeArg = lastSessionFile?.let { " --session ${shellQuote(it)}" } ?: ""
             val exec = SshConnector.connectAndExec(
                 SshConfig(s.host, s.port.toIntOrNull() ?: 22, s.user, auth),
                 "${cd}${s.piCommand}$resumeArg",
@@ -315,7 +324,8 @@ class PiViewModel(app: Application) : AndroidViewModel(app) {
                 // Same for the rebuild below: no historyEpoch bump, so ChatList keeps the
                 // user's scroll position instead of yanking them to the bottom.
                 refreshAll(pinToBottom = resetItems)
-                AppLog.i(TAG, "connect ok${if (!resetItems) " (resumed $lastSessionFile)" else ""}")
+                val resumed = lastSessionFile?.let { " (resumed $it)" } ?: ""
+                AppLog.i(TAG, "connect ok$resumed")
                 true
             } catch (inner: Exception) {
                 runCatching { rpc.close(notify = false) }
@@ -728,7 +738,7 @@ class PiViewModel(app: Application) : AndroidViewModel(app) {
             if (resp?.success == true) {
                 AppLog.i(TAG, "new_session ok, cancelled=${resp.data?.get("cancelled")}")
                 // After a new session, clear the resume target: a later reconnect should stay on the new session, not jump back
-                lastSessionFile = null
+                setLastSessionFile(null)
                 lastEntryId = null
                 lastAssistantEntryId = null
                 tuiSteerBaselineAssistantId = null
@@ -872,7 +882,7 @@ class PiViewModel(app: Application) : AndroidViewModel(app) {
         if (resp?.success == true && resp.data != null) {
             val state = PiState.from(JsonObject(mapOf("data" to resp.data!!)))
             // Remember the current session file so a reconnect can resume with --session
-            state.sessionFile?.takeIf { it.isNotBlank() }?.let { lastSessionFile = it }
+            state.sessionFile?.takeIf { it.isNotBlank() }?.let { setLastSessionFile(it) }
             locallyStreaming = state.isStreaming
             _ui.value = _ui.value.copy(state = state)
             // Also refresh thinking levels
@@ -1119,7 +1129,7 @@ class PiViewModel(app: Application) : AndroidViewModel(app) {
             val line = PiCommands.switchSession(path)
             val resp = client?.request(line, extractId(line) ?: return@launch)
             if (resp?.success == true) {
-                lastSessionFile = path
+                setLastSessionFile(path)
                 lastEntryId = null
                 lastAssistantEntryId = null
                 tuiSteerBaselineAssistantId = null
@@ -1156,7 +1166,7 @@ class PiViewModel(app: Application) : AndroidViewModel(app) {
                     )
                     return@launch
                 }
-                lastSessionFile = path
+                setLastSessionFile(path)
                 lastEntryId = null
                 loadHistory(pinToBottom = true)
                 val stillPending = steeringPendingAfterRefresh(
@@ -1235,7 +1245,7 @@ class PiViewModel(app: Application) : AndroidViewModel(app) {
                     )
                     return@launch
                 }
-                lastSessionFile = path
+                setLastSessionFile(path)
                 lastEntryId = null
                 loadHistory(pinToBottom = true)
                 _ui.value = _ui.value.copy(tuiTakeover = false, tuiTakeoverQueued = false)

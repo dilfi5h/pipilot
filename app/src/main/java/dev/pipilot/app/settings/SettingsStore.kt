@@ -8,6 +8,7 @@ import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.catch
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 
 private val Context.dataStore by preferencesDataStore(name = "pipilot_settings")
@@ -37,6 +38,7 @@ class SettingsStore(private val context: Context) {
     private val KEY_PASSPHRASE = stringPreferencesKey("key_passphrase")
     private val PI_COMMAND = stringPreferencesKey("pi_command")
     private val WORK_DIR = stringPreferencesKey("work_dir")
+    private val LAST_SESSION = stringPreferencesKey("last_session_file")
 
     val settings: Flow<ConnectionSettings> = context.dataStore.data
         // A corrupt DataStore file (process killed mid-write, etc.) would crash every collector on launch;
@@ -55,6 +57,19 @@ class SettingsStore(private val context: Context) {
                 workDir = p[WORK_DIR] ?: "",
             )
         }
+
+    /** Persist the last-used session file so manual connect can resume it. */
+    suspend fun saveLastSession(path: String?) {
+        context.dataStore.edit { p ->
+            if (path.isNullOrBlank()) p.remove(LAST_SESSION) else p[LAST_SESSION] = path
+        }
+    }
+
+    suspend fun loadLastSession(): String? {
+        return context.dataStore.data.catch { emit(emptyPreferences()) }
+            .map { p -> p[LAST_SESSION]?.takeIf { it.isNotBlank() } }
+            .first()
+    }
 
     suspend fun save(s: ConnectionSettings) {
         context.dataStore.edit { p ->

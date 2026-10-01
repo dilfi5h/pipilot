@@ -247,6 +247,9 @@ etc.) only surface extension errors in the MVP and are not modeled one-by-one.
   down the old SSH immediately, then exponential-backoff reconnect (2s→30s).
   During reconnect the UI keeps the chat list + banner; on success resume with
   `pi --mode rpc --session <path>` and rebuild history fully via `get_entries`.
+  Manual connect also resumes the last session file (persisted in DataStore, so
+  it survives app restarts); only "New session" starts fresh and clears the
+  resume target. The session list sheet remains available for manual switching.
   **A reconnect must not disturb what the user is reading:** the list is never
   blanked (only rows that were mid-flight when the socket died — the live bubble,
   half-run tool cards, streaming bash — are dropped), and the rebuild does not
