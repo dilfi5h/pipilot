@@ -62,4 +62,28 @@ class OccupancyTest {
         assertTrue(cmd.contains("source"))
         assertFalse(cmd.contains("hello 'world'"))
     }
+
+    @Test
+    fun takeoverCommandSendsQuitAndReadsReply() {
+        val cmd = Occupancy.takeoverCommand("/tmp/pipilot-501/pipilot/1.sock")
+        assertTrue(cmd.startsWith("python3 -c "))
+        assertTrue(cmd.contains("'/tmp/pipilot-501/pipilot/1.sock'"))
+        assertTrue(cmd.contains("\"command\""))
+        assertTrue(cmd.contains("quit"))
+        // The bridge replies on the connection; the client must read it back.
+        assertTrue(cmd.contains("readline"))
+        // No half-close: the bridge writes the reply on the still-open socket
+        // (half-close + allowHalfOpen reply is unreliable on some runtimes).
+        assertFalse(cmd.contains("SHUT_WR"))
+    }
+
+    @Test
+    fun parseTakeoverReplyMapsReplies() {
+        assertEquals(Occupancy.TakeoverReply.QUIT_NOW, Occupancy.parseTakeoverReply("OK:quit\n"))
+        assertEquals(Occupancy.TakeoverReply.QUEUED, Occupancy.parseTakeoverReply("noise\nOK:queued\n"))
+        assertEquals(Occupancy.TakeoverReply.FAILED, Occupancy.parseTakeoverReply(""))
+        assertEquals(Occupancy.TakeoverReply.FAILED, Occupancy.parseTakeoverReply("ERR:no-session\n"))
+        // A bare OK (old steer-style ack) must not count as a quit.
+        assertEquals(Occupancy.TakeoverReply.FAILED, Occupancy.parseTakeoverReply("OK\n"))
+    }
 }

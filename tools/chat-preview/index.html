@@ -85,6 +85,7 @@
       flex-direction: column;
       overflow: hidden;
       border: 8px solid #111;
+      position: relative;
     }
     .status-bar {
       height: 28px;
@@ -401,6 +402,20 @@
       border-radius: 3px;
     }
     .empty { color: var(--on-variant); font-size: 13px; padding: 24px; text-align: center; }
+    /* occupied footer + takeover dialog demo */
+    .occupied-footer { display: flex; align-items: center; justify-content: center; gap: 6px; padding: 10px 12px; font-size: 12px; color: var(--on-variant); }
+    .occupied-footer .spinner { width: 14px; height: 14px; border: 2px solid var(--outline); border-top-color: var(--on-variant); border-radius: 50%; animation: spin .8s linear infinite; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .takeover-btn { font-size: 12px; color: var(--cyan); background: none; border: none; cursor: pointer; padding: 4px 10px; border-radius: 6px; }
+    .takeover-btn:hover { background: rgba(14,116,144,.12); }
+    .modal-mask { position: absolute; inset: 0; background: rgba(0,0,0,.45); display: flex; align-items: center; justify-content: center; z-index: 10; }
+    .modal { background: var(--surface); border-radius: 14px; padding: 20px; margin: 0 36px; max-width: 300px; box-shadow: 0 8px 24px rgba(0,0,0,.3); }
+    .modal h3 { margin: 0 0 8px; font-size: 15px; color: var(--on-surface); }
+    .modal p { margin: 0 0 18px; font-size: 13px; color: var(--on-variant); line-height: 1.55; }
+    .modal-actions { display: flex; justify-content: flex-end; gap: 8px; }
+    .modal-actions button { font-size: 13px; padding: 8px 18px; border-radius: 8px; border: none; cursor: pointer; }
+    .modal-cancel { background: var(--surface-variant); color: var(--on-surface); }
+    .modal-confirm { background: var(--error); color: #fff; }
   </style>
 </head>
 <body>
@@ -417,6 +432,7 @@
       <label><input type="checkbox" id="demoCodeWrap" checked> 插入代码块换行样例</label>
       <label><input type="checkbox" id="showSpeed" checked> 显示 TTFT / tok/s</label>
       <label><input type="checkbox" id="demoLive" checked> 插入流式气泡样例</label>
+      <label><input type="checkbox" id="demoOccupied"> 显示 occupied 底部栏（接管按钮演示）</label>
       <label><input type="checkbox" id="darkPhone"> 深色手机框（仅背景试看）</label>
       <div class="swatches">
         <span class="swatch read"><i></i>read</span>
@@ -436,6 +452,7 @@
         <li>read 到 <code>.md</code> 时，展开按 Markdown 渲染。</li>
         <li>助手气泡时间戳旁挂本条速度：<code>TTFT 1.2s · 38 tok/s</code>。首轮有 TTFT，工具后续写只留 tok/s。流式 tok/s 带 <code>~</code> 表示估算；等待首 token 时气泡只有光标、不写速度。</li>
         <li>LaTeX <b>不渲染</b>：识别出 <code>$$…$$</code> / <code>\[…\]</code> 公式块，显示原始 LaTeX + 复制按钮（复制含定界符，可直接粘到别处）；行内 <code>$…$</code> 只加等宽底色，保留原文。</li>
+        <li>接管演示（勾选左侧 <code>demoOccupied</code>）：occupied 底部栏出现「接管」按钮 → 确认框（TUI 会在当前工具执行完后退出，然后由 App 接管）→ 确认后底部栏变 spinner + 「已排队，等待 TUI 本轮结束…」。TUI 空闲时直接退出的文案是「正在退出…」。点击排队状态可重置演示。</li>
       </ul>
       <p>刷新数据：<code>scp 'deb:~/.pi/agent/sessions/--root--/*.jsonl' tools/chat-preview/sessions/</code> 然后 <code>python3 tools/chat-preview/parse_sessions.py</code></p>
     </div>
@@ -793,6 +810,7 @@
 
     let active = 0;
     const userExpanded = new Map();
+    let occupiedDemo = "idle"; // idle | dialog | queued — takeover UI demo state
 
     function isExpanded(key, activeDefault) {
       if (document.getElementById("expandAll").checked) return true;
@@ -940,7 +958,41 @@
       ];
       const items = withMockSpeed([...s.items, ...extras]);
       list.innerHTML = items.map(renderItem).join("") || `<div class="empty">空会话</div>`;
+      renderOccupiedDemo();
       if (pinBottom) list.scrollTop = list.scrollHeight;
+    }
+
+    // Takeover UI demo: occupied footer + confirm dialog + queued state.
+    function renderOccupiedDemo() {
+      document.querySelectorAll(".occupied-footer, .modal-mask").forEach(e => e.remove());
+      if (!document.getElementById("demoOccupied").checked) return;
+      const phone = document.getElementById("phone");
+      const list = document.getElementById("list");
+      const footer = document.createElement("div");
+      footer.className = "occupied-footer";
+      if (occupiedDemo === "queued") {
+        footer.title = "点击重置演示";
+        footer.style.cursor = "pointer";
+        footer.onclick = () => { occupiedDemo = "idle"; render({ pinBottom: false }); };
+        footer.innerHTML = `<span class="spinner"></span><span>已排队，等待 TUI 本轮结束…</span>`;
+      } else {
+        footer.innerHTML = `<span>Pull up at bottom to refresh</span><button class="takeover-btn" onclick="occupiedDemo='dialog';render({pinBottom:false})">接管</button>`;
+      }
+      list.appendChild(footer);
+      if (occupiedDemo === "dialog") {
+        const mask = document.createElement("div");
+        mask.className = "modal-mask";
+        mask.onclick = (e) => { if (e.target === mask) { occupiedDemo = "idle"; render({ pinBottom: false }); } };
+        mask.innerHTML = `<div class="modal">
+          <h3>接管这个会话？</h3>
+          <p>TUI 会在当前工具执行完后退出，然后由 App 接管。</p>
+          <div class="modal-actions">
+            <button class="modal-cancel" onclick="occupiedDemo='idle';render({pinBottom:false})">取消</button>
+            <button class="modal-confirm" onclick="occupiedDemo='queued';render({pinBottom:false})">接管</button>
+          </div>
+        </div>`;
+        phone.appendChild(mask);
+      }
     }
 
     function renderSessionButtons() {
@@ -1179,6 +1231,7 @@ RMSNorm(x)
     document.getElementById("demoCodeWrap").addEventListener("change", render);
     document.getElementById("showSpeed").addEventListener("change", render);
     document.getElementById("demoLive").addEventListener("change", render);
+    document.getElementById("demoOccupied").addEventListener("change", () => { occupiedDemo = "idle"; render(); });
     document.getElementById("darkPhone").addEventListener("change", (e) => {
       const phone = document.getElementById("phone");
       if (e.target.checked) {
@@ -1199,6 +1252,21 @@ RMSNorm(x)
     });
 
     renderSessionButtons();
+    if (!window.SESSIONS || !window.SESSIONS.length) {
+      // 假数据：没有 fixtures.js 时看格式用，不看内容
+      window.SESSIONS = [{
+        meta: { title: "假数据会话（看格式用）", model: "demo-model", thinkingLevel: "high", cwd: "~/demo", count: 6 },
+        items: [
+          { kind: "user", key: "fake-u1", text: "帮我看一眼这个报错", time: "12:30:01" },
+          { kind: "assistant", key: "fake-a1", thinking: "先看日志定位堆栈，再看相关代码。", text: "我看一下日志。", time: "12:30:04", ttftMs: 900, toksPerSec: 32.1, firstOfTurn: true },
+          { kind: "tool", key: "fake-t1", toolName: "read", args: "app.log", output: "NullPointerException at Foo.java:42\n\tat Bar.run(Bar.java:17)", isError: false },
+          { kind: "bash", key: "fake-b1", command: "grep -rn NullPointer app/src | head -5", output: "app/src/Foo.java:42: Object foo = null;" },
+          { kind: "assistant", key: "fake-a2", thinking: null, text: "找到问题了，`Foo.java:42` 空指针，加个判空就行。要我直接改吗？", time: "12:30:19", ttftMs: 1100, toksPerSec: 28.4, firstOfTurn: true },
+          { kind: "user", key: "fake-u2", text: "好，你改吧", time: "12:31:02" },
+        ],
+      }];
+      renderSessionButtons();
+    }
     render();
   </script>
 </body>
