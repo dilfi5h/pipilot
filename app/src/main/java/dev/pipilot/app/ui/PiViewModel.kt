@@ -628,6 +628,9 @@ class PiViewModel(app: Application) : AndroidViewModel(app) {
                         imageCount = images.size,
                     ),
                 )
+                // enqueueUserMessage is the single funnel for prompt/steer/followUp, so this is the one
+                // place that catches "the user started talking on a session that never got a name".
+                ensureSessionName()
             }
         }
     }
@@ -1389,15 +1392,44 @@ class PiViewModel(app: Application) : AndroidViewModel(app) {
 
     fun setSessionName(name: String) {
         viewModelScope.launch {
-            val id = PiCommands.nextId()
-            // The same id must go in the request body; otherwise the waiter waits on A while the server replies B → UNMATCHED + false TIMEOUT
-            val resp = client?.request(PiCommands.setSessionNameReq(name, id = id), id)
-            if (resp?.success == true) {
-                _ui.value = _ui.value.copy(state = _ui.value.state?.copy(sessionName = name.ifBlank { null }))
-            } else {
-                _ui.value = _ui.value.copy(error = "Rename failed: ${resp?.error ?: "no response"}")
+            val failure = applySessionName(name)
+            if (failure != null) {
+                _ui.value = _ui.value.copy(error = "Rename failed: $failure")
             }
         }
+    }
+
+    /**
+     * Push [name] into the active session via RPC, keeping the sessionName mirror in sync.
+     * Returns null on success, or the error text to show. Returning the error rather than stashing it in a
+     * field keeps the manual and automatic callers from reading each other's result.
+     */
+    private suspend fun applySessionName(name: String): String? {
+        val id = PiCommands.nextId()
+        // The same id must go in the request body; otherwise the waiter waits on A while the server replies B → UNMATCHED + false TIMEOUT
+        val resp = client?.request(PiCommands.setSessionNameReq(name, id = id), id)
+        if (resp?.success != true) return resp?.error ?: "no response"
+        _ui.value = _ui.value.copy(state = _ui.value.state?.copy(sessionName = name.ifBlank { null }))
+        return null
+    }
+
+    /**
+     * Give the active session a short random name when the user never set one.
+     *
+     * Called after the first accepted prompt: a session with no name still shows its file name in the title strip,
+     * and `session_info` names are what the pi TUI shows too, so writing it through `set_session_name` makes both agree.
+     * Idempotent by construction — once the name is in the jsonl, `get_state` reads it back and this returns immediately.
+     * Silent on failure: a missing cosmetic name must not raise an error the user has to dismiss.
+     */
+    private suspend fun ensureSessionName() {
+        if (!_ui.value.state?.sessionName.isNullOrBlank()) return
+        val generated = SessionNameGen.generate()
+        val failure = applySessionName(generated)
+        if (failure != null) {
+            AppLog.w(TAG, "ensureSessionName: set_session_name failed, leaving name unset: $failure")
+            return
+        }
+        AppLog.i(TAG, "ensureSessionName: named session $generated")
     }
 
     fun compact() {

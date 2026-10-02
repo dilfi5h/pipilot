@@ -302,5 +302,6 @@ the repo cleaner and avoids reviewing a wrapper jar binary.
 - [ ] Session tree: `get_tree` / `get_fork_messages` / `fork` / `clone` (TUI `/tree`)
 - [ ] `export_html` + on-phone preview
 - [x] Signed release builds in CI (`assembleRelease`)
+- [x] Auto session name: when the active session has no `sessionInfo.name`, the first accepted prompt triggers `set_session_name` with a 5-char random name (`SessionNameGen`, ambiguity-free alphabet). Written through the existing RPC so the pi TUI shows the same name. `set_session_name` only names the *current* session, so the other entries in the session list are never auto-named — naming them would require `switch_session`, which interrupts the agent. Failure is silent (cosmetic). Idempotent by construction: the name lands in the jsonl, `get_state` reads it back, and `ensureSessionName` short-circuits.
 - [ ] Encrypted credential storage
 - [ ] TUI intervention: one host extension (`tools/pi-bridge/index.ts`) writes occupancy JSON (pid → session jsonl + inbox socket) and listens on that socket. PiPilot discovers live TUI pids and writes inbox; it does not spawn a second RPC on the TUI's jsonl.
