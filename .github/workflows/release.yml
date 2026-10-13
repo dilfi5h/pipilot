@@ -15,7 +15,11 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          # Full clone: versionCode counts commits, versionName is read from the tag
+          # Full clone. Note: the app version is NOT derived from git — versionCode /
+          # versionName are hardcoded in app/build.gradle.kts and bumped by hand in a
+          # "chore: bump version to X.Y.Z" commit before the tag. The build never reads
+          # the tag for the version (its name is only used for the APK filename);
+          # release notes come from the GitHub API, not local history.
           fetch-depth: 0
 
       - name: Set up JDK 17

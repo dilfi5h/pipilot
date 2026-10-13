@@ -78,6 +78,11 @@ Session dumps and generated `fixtures.js` are gitignored. Commands and current m
 - **Sessions**: `new_session`, list remote `~/.pi/agent/sessions/*.jsonl` and switch
   (`switch_session`), load history (`get_entries`), session stats
   (`get_session_stats`: tokens / context usage)
+- **TUI occupancy / steer / takeover** (needs the host `pipilot-bridge` extension):
+  the session sheet labels each row Occupied / Idle from live bridge records; an
+  occupied session can be steered through its inbox socket, **taken over** (the TUI
+  quits after the current tool, then the app becomes the owner) or, once the app owns
+  it, **handed back** to a detached `screen` TUI
 - **Image attachments**: pick images in the composer, compress to JPEG, send with `prompt.images`
 - **Multi-host profiles**: save/switch named hosts in Settings
 - **Background keep-alive**: short FGS + WakeLock/WifiLock (~10 min) when backgrounded;
@@ -110,6 +115,30 @@ ls ~/.pi/agent/sessions/
 
 Note: RPC mode does not inherit TUI terminal rendering, but extensions, skills, and
 prompt templates all work. TUI-only commands (e.g. `/settings`) do not run in RPC mode.
+
+### Host extension: `pipilot-bridge` (needed for TUI occupancy / steer / takeover)
+
+Talking to `pi --mode rpc` works without any host setup. But **TUI awareness** — the
+Occupied / Idle label in the session sheet, steering a session a desktop TUI already
+owns, and **Take over** / **Hand back** — needs a small pi extension on the host:
+
+```bash
+mkdir -p ~/.pi/agent/extensions
+cp tools/pi-bridge/index.ts ~/.pi/agent/extensions/pipilot-bridge.ts
+# then start pi (TUI or RPC) once so the extension loads on session_start
+```
+
+On `session_start` it listens on `$XDG_RUNTIME_DIR/pipilot/<pid>.sock` (fallback
+`/tmp/pipilot-<uid>/pipilot/`) and writes an occupancy JSON next to it, so the app can
+tell which live pi pid owns which session jsonl and write messages into that process.
+Without it, chat and session switching still work; only occupancy / steer / takeover /
+hand-back are unavailable.
+
+**The extension must be current, not just present.** The takeover handshake changed
+the socket reply protocol (`OK:queued`, reply-on-open-socket); an old `pipilot-bridge.ts`
+loads fine but fails silently — the quit reply is lost and the app never takes over.
+Re-copy `tools/pi-bridge/index.ts` after upgrading. Protocol details:
+[`tools/pi-bridge/README.md`](tools/pi-bridge/README.md).
 
 ## Security
 
