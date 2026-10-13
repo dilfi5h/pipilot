@@ -185,7 +185,15 @@ etc.) only surface extension errors in the MVP and are not modeled one-by-one.
   is trimmed; Ed25519/PKCS8 parsing would miss classes).
   Dependency note: sshj transitively pulls both `bcprov-jdk15on` and
   `bcprov-jdk18on`; the old module must be excluded or duplicate classes fail the build.
-- Auth supports password and PEM private key (`PKCS8KeyFile`, optional passphrase).
+- Auth supports password and PEM private key (`PKCS8KeyFile` / OpenSSH-v1
+  parser, optional passphrase), but **Ed25519 keys do not authenticate from
+  the app**: the key parses OK, yet sshj 0.40 disconnects right after KEX
+  before sending any userauth packet, surfacing as `Exhausted available
+  authentication methods` with zero server-side log lines (verified 2026-10-13
+  against ddeb with a debug `sshd -d -p 2222`; the same key works from desktop
+  OpenSSH, RSA-3072 works). Use RSA keys for key auth until the sshj/EdDSA
+  provider chain on Android is fixed. Standing limitation since v0.0.3, not a
+  regression.
 - The `exec` channel starts `(cd <workdir> &&) <piCommand>`, default
   `pi --mode rpc`; stderr is drained continuously and logged (so a full buffer
   cannot block pi).
