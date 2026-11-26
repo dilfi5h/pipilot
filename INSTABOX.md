@@ -68,8 +68,7 @@ instabox suspend ib                                                         # �
 - 盒子出的 APK 用同一把钥匙签名，可以直接覆盖手机上已装的包。
 - 代码以本地为唯一真相，盒子掉了不影响仓库。
 - 本地无改动但盒子行为诡异时，先 `instabox exec ib --cwd /data/workspace/pipilot -- 'git status --porcelain'` 对比；盒子上的残留未跟踪文件不会被自动清理（`git reset --hard` 只管已跟踪文件），需要时手动 `git clean -nd` 看一眼再清。
-- 磁盘：`df -h / /data` 看用量。`/data` 放代码和 gradle 缓存，满了用 `instabox resize ib --disk N`（只能变大，需要停机）。
-- 同时只留 `ib` 一台机器。多出来的盒子占名额和存储，确认不再需要就 `instabox rm --yes <名字>`。
+- 磁盘：`df -h / /data` 看用量。`/data` 放代码和 gradle 缓存。
 
 ## 首次准备（在 `ib` 上做一次）
 
