@@ -49,7 +49,8 @@
 tools/instabox-build.sh
 ```
 
-细节（盒子规格、手动命令、重建盒子）见 [`INSTABOX.md`](INSTABOX.md)。
+**只用默认的 `ib` 机器，不允许用 `instabox create` 新建机器。** 装工具链、升 SDK、清缓存都在 `ib` 上做。
+细节（机器规格、手动命令、首次准备）见 [`INSTABOX.md`](INSTABOX.md)。
 
 想在本机打也可以：
 

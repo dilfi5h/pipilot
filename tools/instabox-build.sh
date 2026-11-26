@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
-# 在 instabox 盒子（默认 pipilot）上跑单测 + release 构建，然后把 APK 拉回本地。
+# 在 instabox 的 ib 机器上跑单测 + release 构建，然后把 APK 拉回本地。
+# 只允许用 ib，不要用 instabox create 新建机器。
 # 用法: tools/instabox-build.sh [额外的 gradle 参数，例如 --offline]
 # 详见 INSTABOX.md。
 set -euo pipefail
 
-BOX=${INSTABOX_BOX:-pipilot}
+BOX=${INSTABOX_BOX:-ib}
 DEST=/data/workspace/pipilot
 SDK=/data/android-sdk
 APK_REL=app/build/outputs/apk/release/app-release.apk
@@ -17,6 +18,9 @@ if [ "$BRANCH" = "HEAD" ]; then
   echo "当前是 detached HEAD，先切到分支再同步" >&2
   exit 1
 fi
+
+# 手动 suspend 过的盒子不会被 ssh 自动唤醒，先兜底 start（已运行是空操作）
+instabox start "$BOX" >/dev/null 2>&1 || true
 
 TMPD=$(mktemp -d)
 trap 'rm -rf "$TMPD"' EXIT

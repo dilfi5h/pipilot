@@ -1,23 +1,30 @@
 # INSTABOX
 
 pipilot 的编译和单测跑在 instabox 的 Linux 盒子上，本地只负责改代码、装 APK。
-盒子里有完整的 gradle / Android SDK / 签名，本机不需要装 Android SDK 也能出 release 包。
+本机不需要装 Android SDK 也能出 release 包。
 
-## 盒子
+## 机器：只用 `ib`
+
+**不允许用 `instabox create` 新建机器，一律用默认的 `ib`。**
+装工具链、升 SDK、清缓存都在 `ib` 上做，不要另起一台。
 
 | 项 | 值 |
 | --- | --- |
-| 盒子 | `pipilot`（instabox free plan，4 vCPU / 8 GB，Debian 13） |
+| 盒子 | `ib`（instabox free plan，4 vCPU / 8 GB，`agent-browser` 模板，Debian 13） |
 | 仓库 | `/data/workspace/pipilot`（`/data` 是持久盘，HOME 是 `/data/home`） |
-| 用户 | `dilfish`，免密 sudo |
-| Gradle | 8.9，装在 `/opt/gradle-8.9`，软链到 `/usr/local/bin/gradle` |
+| 用户 | `user`（免密 sudo；注意不是本地用户名 `dilfish`） |
+| Gradle | 8.9，`/opt/gradle-8.9`，软链到 `/usr/local/bin/gradle` |
 | Android SDK | `/data/android-sdk`：`platforms;android-35`、`build-tools;35.0.0`、`platform-tools` |
 | JDK | 系统自带 OpenJDK 21（Gradle 8.9 / AGP 8.7.3 / Kotlin 2.0.21 都支持） |
-| 签名 | `pipilot-release.keystore` + `keystore.properties` 已放在仓库根，被 `.gitignore` 忽略，不走同步 |
+| 签名 | `pipilot-release.keystore` + `keystore.properties` 放在仓库根，被 `.gitignore` 忽略，不走同步 |
 | `local.properties` | `sdk.dir=/data/android-sdk`，同样被忽略，不走同步 |
 
-盒子闲置 30 分钟自动挂起，`instabox exec` / `instabox ssh` 会自动唤醒。
-单次运行上限看 `instabox get pipilot` 的 `maxRunMinutes`（这台是 **120 分钟**，旧盒子 `ib` 是 480，别硬记），到点强制挂起并冷却 10 分钟（`cooldownUntil`）。编译完不用就 `instabox suspend pipilot`，挂起的时间不计入运行时长。
+上面 Gradle / SDK / 仓库这几项是**首次准备**（见文末）之后才有的状态；`ib` 刚恢复或换新时先跑一次准备步骤。
+
+闲置 30 分钟会自动挂起，`instabox exec` / `instabox ssh` 会自动唤醒它。
+单次运行上限看 `instabox get ib` 的 `maxRunMinutes`（`ib` 是 **480 分钟**），到点强制挂起并冷却 10 分钟（`cooldownUntil`）。
+
+**手动挂起的盒子不会自动唤醒**：`instabox suspend ib` 之后，`exec` / `ssh` 会直接报 `sandbox ib is paused; run instabox start ib`，必须先 `instabox start ib`。所以平时别手动 suspend，交给空闲自动挂起即可，脚本也能用。
 
 ## 日常：一条命令
 
@@ -32,8 +39,8 @@ tools/instabox-build.sh
 3. 盒子上跑 `gradle :app:testDebugUnitTest assembleRelease`；
 4. 把 `app/build/outputs/apk/release/app-release.apk` 拉回来覆盖本地同名文件。
 
+脚本开头会 `instabox start ib` 兜底（盒子已运行就是空操作），所以手动 suspend 过的盒子也能直接跑。
 额外 gradle 参数直接跟在后面，例如 `tools/instabox-build.sh --offline`。
-盒子名可以用环境变量覆盖：`INSTABOX_BOX=other-box tools/instabox-build.sh`。
 
 耗时参考：首次（下依赖）约 3 分钟；改几个 Kotlin 文件约 30–60 秒；无改动约 30 秒。
 单测失败时脚本以非 0 退出，不会拉 APK。
@@ -41,41 +48,47 @@ tools/instabox-build.sh
 ## 手动操作
 
 ```sh
-instabox ssh pipilot                                                             # 进盒子（exit 退出）
-instabox exec pipilot --cwd /data/workspace/pipilot -- 'git status --porcelain'   # 看盒子上的状态
-instabox ssh pipilot -- 'cd /data/workspace/pipilot && ANDROID_HOME=/data/android-sdk gradle :app:testDebugUnitTest'
-instabox cp pipilot:/data/workspace/pipilot/app/build/outputs/apk/release/app-release.apk app/build/outputs/apk/release/app-release.apk
-instabox pull pipilot /data/workspace/pipilot/app/build/reports/tests/testDebugUnitTest /tmp/pipilot-test-report   # 单测报告
-instabox get pipilot                                                             # 状态、运行时长、冷却
-instabox suspend pipilot                                                         # 手动挂起（不用删盒子）
+instabox ssh ib                                                             # 进盒子（exit 退出）
+instabox exec ib --cwd /data/workspace/pipilot -- 'git status --porcelain'   # 看盒子上的状态
+instabox ssh ib -- 'cd /data/workspace/pipilot && ANDROID_HOME=/data/android-sdk gradle :app:testDebugUnitTest'
+instabox cp ib:/data/workspace/pipilot/app/build/outputs/apk/release/app-release.apk app/build/outputs/apk/release/app-release.apk
+instabox pull ib /data/workspace/pipilot/app/build/reports/tests/testDebugUnitTest /tmp/pipilot-test-report   # 单测报告
+instabox get ib                                                             # 状态、运行时长、冷却
+instabox suspend ib                                                         # 手动挂起（之后要先 start）
 ```
 
-- `instabox exec` 最多 600 秒，长任务用 `instabox ssh`（无时间限制），或用 `instabox exec --background pipilot -- 'cmd'` 加 `instabox jobs logs pipilot <job> -f`。
-- 看盒子上有什么进程：`instabox ps pipilot`。
+- `instabox exec` 最多 600 秒，长任务用 `instabox ssh`（无时间限制），或用 `instabox exec --background ib -- 'cmd'` 加 `instabox jobs logs ib <job> -f`。
+- 看盒子上有什么进程：`instabox ps ib`。
 - 盒子里的 git 没有远端凭据，只能编译，`git push` / `git pull` 在盒子上会失败；需要的话在盒子里 `gh auth login`。
 
 ## 注意
 
 - **盒子是编译机，不要在盒子上改代码。** 脚本每次 `git reset --hard` + 推送，盒子上的改动会被覆盖。
-- 签名文件和 `local.properties` 被 gitignore，同步不会碰它们，只在首次搭建时拷过一次。
+- 签名文件和 `local.properties` 被 gitignore，同步不会碰它们，只在首次准备时拷过一次。
 - 盒子出的 APK 用同一把钥匙签名，可以直接覆盖手机上已装的包。
 - 代码以本地为唯一真相，盒子掉了不影响仓库。
-- 本地无改动但盒子行为诡异时，先 `instabox exec pipilot --cwd /data/workspace/pipilot -- 'git status --porcelain'` 对比；盒子上的残留未跟踪文件不会被自动清理（`git reset --hard` 只管已跟踪文件），需要时手动 `git clean -nd` 看一眼再清。
-- 磁盘：`df -h / /data` 看用量。`/data` 放代码和 gradle 缓存，满了用 `instabox resize pipilot --disk N`（只能变大，需要停机）。
+- 本地无改动但盒子行为诡异时，先 `instabox exec ib --cwd /data/workspace/pipilot -- 'git status --porcelain'` 对比；盒子上的残留未跟踪文件不会被自动清理（`git reset --hard` 只管已跟踪文件），需要时手动 `git clean -nd` 看一眼再清。
+- 磁盘：`df -h / /data` 看用量。`/data` 放代码和 gradle 缓存，满了用 `instabox resize ib --disk N`（只能变大，需要停机）。
+- 同时只留 `ib` 一台机器。多出来的盒子占名额和存储，确认不再需要就 `instabox rm --yes <名字>`。
 
-## 重建盒子
+## 首次准备（在 `ib` 上做一次）
 
-盒子被删或换新机器时（名字必须换或先 `rm`）：
+`ib` 上没有 Gradle / Android SDK / 仓库 / 签名时，按顺序跑一遍：
 
 ```sh
-instabox create --name pipilot --meta repo=pipilot
-instabox ssh pipilot -- 'curl -fsSL -o /tmp/g.zip https://services.gradle.org/distributions/gradle-8.9-bin.zip && sudo unzip -q -o /tmp/g.zip -d /opt && sudo ln -sf /opt/gradle-8.9/bin/gradle /usr/local/bin/gradle'
-instabox ssh pipilot -- 'mkdir -p /data/android-sdk/cmdline-tools && curl -fsSL -o /tmp/c.zip https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip && unzip -q -o /tmp/c.zip -d /tmp/ct && mv /tmp/ct/cmdline-tools /data/android-sdk/cmdline-tools/latest && yes | /data/android-sdk/cmdline-tools/latest/bin/sdkmanager --sdk_root=/data/android-sdk --licenses >/dev/null && /data/android-sdk/cmdline-tools/latest/bin/sdkmanager --sdk_root=/data/android-sdk "platform-tools" "platforms;android-35" "build-tools;35.0.0"'
-tools/instabox-build.sh
-instabox cp pipilot-release.keystore pipilot:/data/workspace/pipilot/pipilot-release.keystore
-instabox cp keystore.properties pipilot:/data/workspace/pipilot/keystore.properties
-instabox exec pipilot -- 'printf "sdk.dir=/data/android-sdk\n" > /data/workspace/pipilot/local.properties'
+instabox start ib
+instabox ssh ib -- 'curl -fsSL -o /tmp/g.zip https://services.gradle.org/distributions/gradle-8.9-bin.zip && sudo unzip -q -o /tmp/g.zip -d /opt && sudo ln -sf /opt/gradle-8.9/bin/gradle /usr/local/bin/gradle'
+instabox ssh ib -- 'mkdir -p /data/android-sdk/cmdline-tools && curl -fsSL -o /tmp/c.zip https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip && unzip -q -o /tmp/c.zip -d /tmp/ct && mv /tmp/ct/cmdline-tools /data/android-sdk/cmdline-tools/latest && yes | /data/android-sdk/cmdline-tools/latest/bin/sdkmanager --sdk_root=/data/android-sdk --licenses >/dev/null && /data/android-sdk/cmdline-tools/latest/bin/sdkmanager --sdk_root=/data/android-sdk "platform-tools" "platforms;android-35" "build-tools;35.0.0"'
+instabox cp pipilot-release.keystore ib:/data/workspace/pipilot/pipilot-release.keystore
+instabox cp keystore.properties ib:/data/workspace/pipilot/keystore.properties
+instabox exec ib -- 'printf "sdk.dir=/data/android-sdk\n" > /data/workspace/pipilot/local.properties'
 tools/instabox-build.sh
 ```
 
-（先跑一次脚本是为了把仓库推上去、建出目录，之后拷签名，再跑一次出签名包。）
+顺序有讲究：`tools/instabox-build.sh` 第一次跑会推送代码并建出 `/data/workspace/pipilot`，所以签名文件和 `local.properties` 要在仓库目录存在之后再拷；也可以在工具链装好前先跑一次脚本（编译会失败），把目录和代码落位，拷完签名后再跑一次出包。
+
+升 `compileSdk` 时只补对应组件，不要新建机器：
+
+```sh
+instabox ssh ib -- '/data/android-sdk/cmdline-tools/latest/bin/sdkmanager --sdk_root=/data/android-sdk "platforms;android-36" "build-tools;36.0.0"'
+```
