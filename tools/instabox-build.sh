@@ -28,10 +28,19 @@ trap 'rm -rf "$TMPD"' EXIT
 echo "== 同步 git 历史（含删除/改名）"
 git bundle create "$TMPD/sync.bundle" "refs/heads/$BRANCH" >/dev/null
 instabox cp "$TMPD/sync.bundle" "$BOX:/tmp/pipilot-sync.bundle" >/dev/null
-instabox ssh "$BOX" -- "cd $DEST && git fetch -q -f /tmp/pipilot-sync.bundle 'refs/heads/$BRANCH:refs/instabox/sync' && git reset -q --hard refs/instabox/sync"
+# 盒子上还没有仓库时从 bundle 克隆（首次准备），否则 fetch + reset（含删除/改名）
+instabox ssh "$BOX" -- "if [ -d $DEST/.git ]; then cd $DEST && git fetch -q -f /tmp/pipilot-sync.bundle 'refs/heads/$BRANCH:refs/instabox/sync' && git reset -q --hard refs/instabox/sync; else mkdir -p /data/workspace && git clone -q -b $BRANCH /tmp/pipilot-sync.bundle $DEST; fi"
 
 echo "== 同步未提交改动"
 instabox push "$BOX" . /data/workspace --all
+
+# 签名文件和 local.properties 被 gitignore，不会跟着同步，只在新盒子上补一次
+if ! instabox exec "$BOX" -- "test -f $DEST/keystore.properties" >/dev/null 2>&1; then
+  echo "== 补齐签名和 local.properties"
+  instabox cp pipilot-release.keystore "$BOX:$DEST/pipilot-release.keystore" >/dev/null
+  instabox cp keystore.properties "$BOX:$DEST/keystore.properties" >/dev/null
+  instabox exec "$BOX" -- "printf 'sdk.dir=$SDK\n' > $DEST/local.properties" >/dev/null
+fi
 
 echo "== 编译 + 单测"
 instabox ssh "$BOX" -- "cd $DEST && ANDROID_HOME=$SDK /usr/local/bin/gradle $* :app:testDebugUnitTest assembleRelease"

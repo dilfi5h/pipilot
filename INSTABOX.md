@@ -64,7 +64,7 @@ instabox suspend ib                                                         # �
 ## 注意
 
 - **盒子是编译机，不要在盒子上改代码。** 脚本每次 `git reset --hard` + 推送，盒子上的改动会被覆盖。
-- 签名文件和 `local.properties` 被 gitignore，同步不会碰它们，只在首次准备时拷过一次。
+- 签名文件和 `local.properties` 被 gitignore，同步不会碰它们；脚本发现盒子上缺 `keystore.properties` 时会自动补拷一次。
 - 盒子出的 APK 用同一把钥匙签名，可以直接覆盖手机上已装的包。
 - 代码以本地为唯一真相，盒子掉了不影响仓库。
 - 本地无改动但盒子行为诡异时，先 `instabox exec ib --cwd /data/workspace/pipilot -- 'git status --porcelain'` 对比；盒子上的残留未跟踪文件不会被自动清理（`git reset --hard` 只管已跟踪文件），需要时手动 `git clean -nd` 看一眼再清。
@@ -73,19 +73,27 @@ instabox suspend ib                                                         # �
 
 ## 首次准备（在 `ib` 上做一次）
 
-`ib` 上没有 Gradle / Android SDK / 仓库 / 签名时，按顺序跑一遍：
+`ib` 的 JDK 21 是模板自带的，缺的只有 Gradle 和 Android SDK。装完直接跑脚本，剩下的它自己补：
 
 ```sh
 instabox start ib
 instabox ssh ib -- 'curl -fsSL -o /tmp/g.zip https://services.gradle.org/distributions/gradle-8.9-bin.zip && sudo unzip -q -o /tmp/g.zip -d /opt && sudo ln -sf /opt/gradle-8.9/bin/gradle /usr/local/bin/gradle'
 instabox ssh ib -- 'mkdir -p /data/android-sdk/cmdline-tools && curl -fsSL -o /tmp/c.zip https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip && unzip -q -o /tmp/c.zip -d /tmp/ct && mv /tmp/ct/cmdline-tools /data/android-sdk/cmdline-tools/latest && yes | /data/android-sdk/cmdline-tools/latest/bin/sdkmanager --sdk_root=/data/android-sdk --licenses >/dev/null && /data/android-sdk/cmdline-tools/latest/bin/sdkmanager --sdk_root=/data/android-sdk "platform-tools" "platforms;android-35" "build-tools;35.0.0"'
-instabox cp pipilot-release.keystore ib:/data/workspace/pipilot/pipilot-release.keystore
-instabox cp keystore.properties ib:/data/workspace/pipilot/keystore.properties
-instabox exec ib -- 'printf "sdk.dir=/data/android-sdk\n" > /data/workspace/pipilot/local.properties'
 tools/instabox-build.sh
 ```
 
-顺序有讲究：`tools/instabox-build.sh` 第一次跑会推送代码并建出 `/data/workspace/pipilot`，所以签名文件和 `local.properties` 要在仓库目录存在之后再拷；也可以在工具链装好前先跑一次脚本（编译会失败），把目录和代码落位，拷完签名后再跑一次出包。
+脚本负责剩下的：
+
+- `/data/workspace/pipilot` 不存在时，从 `git bundle` 直接 `git clone`，之后每次改成 `fetch` + `reset --hard`；
+- 盒子上的 `keystore.properties` 不存在时，自动补拷 `pipilot-release.keystore`、`keystore.properties` 并写 `local.properties`（被 gitignore，日常同步不碰它们）。
+
+实测：工具链装完到出包约 3–4 分钟（首次要下 gradle 依赖）。
+
+升 `compileSdk` 时只补对应组件，不要新建机器：
+
+```sh
+instabox ssh ib -- '/data/android-sdk/cmdline-tools/latest/bin/sdkmanager --sdk_root=/data/android-sdk "platforms;android-36" "build-tools;36.0.0"'
+```
 
 升 `compileSdk` 时只补对应组件，不要新建机器：
 
