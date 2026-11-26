@@ -17,7 +17,7 @@ pipilot 的编译和单测跑在 instabox 的 Linux 盒子上，本地只负责�
 | `local.properties` | `sdk.dir=/data/android-sdk`，同样被忽略，不走同步 |
 
 盒子闲置 30 分钟自动挂起，`instabox exec` / `instabox ssh` 会自动唤醒。
-free plan 单次运行上限 480 分钟，到点强制挂起并冷却 10 分钟（`instabox get pipilot` 的 `cooldownUntil`）。
+单次运行上限看 `instabox get pipilot` 的 `maxRunMinutes`（这台是 **120 分钟**，旧盒子 `ib` 是 480，别硬记），到点强制挂起并冷却 10 分钟（`cooldownUntil`）。编译完不用就 `instabox suspend pipilot`，挂起的时间不计入运行时长。
 
 ## 日常：一条命令
 
