@@ -39,16 +39,26 @@
 
 测试或行为不对：停在这一层修，不要带着红测试去打包。
 
-## 4. 本地打 release 包
+## 4. 打 release 包
 
 真机验证用 **signed release**（R8 minify + shrink），debug 包过不了 ProGuard / 覆盖安装。
+
+默认在 instabox 的 Linux 盒子上编译，本机不用装 Android SDK，一条命令同步代码、跑单测、打包并拉回 APK：
+
+```bash
+tools/instabox-build.sh
+```
+
+细节（盒子规格、手动命令、重建盒子）见 [`INSTABOX.md`](INSTABOX.md)。
+
+想在本机打也可以：
 
 ```bash
 gradle :app:testDebugUnitTest --offline
 gradle assembleRelease
 ```
 
-产物：`app/build/outputs/apk/release/app-release.apk`。
+产物都是 `app/build/outputs/apk/release/app-release.apk`（两处签名同一把钥匙，可互相覆盖安装）。
 
 打包失败（R8、资源、签名）回到第 3 步改代码或 ProGuard，不要让用户装坏包。
 
