@@ -49,6 +49,7 @@ import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
 import dev.pipilot.app.rpc.joinQueueDraft
+import dev.pipilot.app.rpc.longOrNull
 import dev.pipilot.app.rpc.str
 import dev.pipilot.app.rpc.stringList
 
@@ -68,6 +69,57 @@ data class SessionEntryInfo(
     val name: String,
     val mtime: String,
 )
+
+/**
+ * Session-cumulative token usage from `get_session_stats`, mirroring the pi TUI
+ * cache-hit footer extension: ↑input, R cacheRead, W cacheWrite, ↓output plus CHT.
+ * Distinct from the per-reply TTFT / tok/s that hangs on the assistant bubble.
+ */
+data class UsageStats(
+    val input: Long = 0,
+    val cacheRead: Long = 0,
+    val cacheWrite: Long = 0,
+    val output: Long = 0,
+    val cost: Double = 0.0,
+) {
+    /** Prompt tokens: the cache-hit denominator (output is not part of it). */
+    val promptTokens: Long get() = input + cacheRead + cacheWrite
+
+    /** CHT = cacheRead / (input + cacheRead + cacheWrite); null before any prompt usage. */
+    val cacheHitPercent: Double?
+        get() = if (promptTokens > 0) cacheRead * 100.0 / promptTokens else null
+
+    /** Nothing worth a status line yet (fresh session / stats not loaded). */
+    val isEmpty: Boolean get() = promptTokens == 0L && output == 0L
+}
+
+/** Right side of status line 1 (context %) plus status line 2 (cumulative tokens). */
+data class SessionStats(
+    val usage: UsageStats = UsageStats(),
+    val contextPercent: String? = null,
+)
+
+/** Compact token count, same thresholds as the pi TUI footer: 999 / 1.2k / 12k / 1.2M. */
+internal fun formatTokenCount(n: Long): String = when {
+    n < 1_000 -> n.toString()
+    n < 10_000 -> String.format(java.util.Locale.US, "%.1fk", n / 1000.0)
+    n < 1_000_000 -> "${Math.round(n / 1000.0)}k"
+    else -> String.format(java.util.Locale.US, "%.1fM", n / 1_000_000.0)
+}
+
+/**
+ * Status-strip line 2: `↑7.4k · R34k · ↓3.1k · CHT82.1%`.
+ * cacheWrite and cost are omitted when zero (subscription providers report no cost);
+ * total is deliberately not shown — the four raw counters are the point.
+ */
+internal fun formatUsageLine(u: UsageStats): String = buildString {
+    append("↑").append(formatTokenCount(u.input))
+    append(" · R").append(formatTokenCount(u.cacheRead))
+    if (u.cacheWrite > 0) append(" · W").append(formatTokenCount(u.cacheWrite))
+    append(" · ↓").append(formatTokenCount(u.output))
+    u.cacheHitPercent?.let { append(" · CHT").append(String.format(java.util.Locale.US, "%.1f%%", it)) }
+    if (u.cost > 0) append(" · \$").append(String.format(java.util.Locale.US, "%.3f", u.cost))
+}
 
 data class UiState(
     val connectionLabel: String = "Disconnected",
@@ -102,7 +154,8 @@ data class UiState(
     /** abort/clear_queue restore unsent queue text into the composer; UI should call consumeRestoreDraft after applying. */
     val restoreDraft: String? = null,
     val dialog: UiDialog? = null,
-    val statsText: String? = null,
+    /** Session-cumulative token stats (status strip line 2) and context percent (line 1). */
+    val stats: SessionStats? = null,
     /** Bumped after a full history rebuild so ChatList re-pins to the latest output. */
     val historyEpoch: Long = 0,
 )
@@ -513,6 +566,8 @@ class PiViewModel(app: Application) : AndroidViewModel(app) {
                 locallyStreaming = false
                 _ui.value = _ui.value.copy(state = _ui.value.state?.copy(isStreaming = false))
                 reduceChat(ev)
+                // Session totals only move when a turn settles; not per token (get_session_stats is a round trip).
+                if (ev.type == "agent_settled") viewModelScope.launch { refreshStats() }
             }
             else -> reduceChat(ev)
         }
@@ -756,7 +811,7 @@ class PiViewModel(app: Application) : AndroidViewModel(app) {
                 tuiSteerBaselineAssistantId = null
                 _ui.value = _ui.value.copy(
                     items = listOf(ChatItem.SystemNote("New session started", key = "new-session-${System.currentTimeMillis()}")),
-                    statsText = null,
+                    stats = null,
                     queueSteering = emptyList(),
                     queueFollowUp = emptyList(),
                     restoreDraft = null,
@@ -944,18 +999,17 @@ class PiViewModel(app: Application) : AndroidViewModel(app) {
         val id = PiCommands.nextId()
         val resp = client?.request(PiCommands.named("get_session_stats", id = id), id)
         val d = resp?.data ?: return
-        val ctx = d["contextUsage"] as? JsonObject
         val tokens = d["tokens"] as? JsonObject
-        val text = buildString {
-            append("tokens: ")
-            append((tokens?.get("total") as? JsonPrimitive)?.contentOrNull ?: "?")
-            if (ctx != null) {
-                append(" · context ")
-                append(formatPercent((ctx["percent"] as? JsonPrimitive)?.contentOrNull))
-                append("%")
-            }
-        }
-        _ui.value = _ui.value.copy(statsText = text)
+        val ctx = d["contextUsage"] as? JsonObject
+        val usage = UsageStats(
+            input = tokens?.longOrNull("input") ?: 0L,
+            cacheRead = tokens?.longOrNull("cacheRead") ?: 0L,
+            cacheWrite = tokens?.longOrNull("cacheWrite") ?: 0L,
+            output = tokens?.longOrNull("output") ?: 0L,
+            cost = (d["cost"] as? JsonPrimitive)?.contentOrNull?.toDoubleOrNull() ?: 0.0,
+        )
+        val contextPercent = ctx?.str("percent")?.let { formatPercent(it) }
+        _ui.value = _ui.value.copy(stats = SessionStats(usage = usage, contextPercent = contextPercent))
     }
 
     /** Context percent keeps at most two decimals; integers drop trailing zeros (30 / 12.5 / 12.34). */
@@ -1433,7 +1487,11 @@ class PiViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun compact() {
-        viewModelScope.launch { client?.sendLine(PiCommands.named("compact")) }
+        viewModelScope.launch {
+            val id = PiCommands.nextId()
+            // Tokens absorb the summary call, so refresh the strip once compaction answers (success or not).
+            if (client?.request(PiCommands.named("compact", id = id), id) != null) refreshStats()
+        }
     }
 
     fun answerDialog(answer: DialogAnswer) {

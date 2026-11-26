@@ -81,6 +81,21 @@ def format_shanghai(ms: int | None) -> str:
 def parse_file(path: Path) -> dict:
     items: list[dict] = []
     meta = {"file": path.name, "cwd": "", "model": "", "thinkingLevel": "", "title": path.stem}
+    # Session-cumulative token totals, mirroring the TUI cache-hit footer extension:
+    # assistant + toolResult + compaction/branch-summary usage, plus standalone `usage` entries.
+    usage = {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0, "cost": 0.0, "requests": 0}
+
+    def add_usage(u) -> None:
+        if not isinstance(u, dict):
+            return
+        for key in ("input", "output", "cacheRead", "cacheWrite"):
+            value = u.get(key)
+            if isinstance(value, (int, float)):
+                usage[key] += int(value)
+        cost = (u.get("cost") or {}).get("total") if isinstance(u.get("cost"), dict) else None
+        if isinstance(cost, (int, float)):
+            usage["cost"] += float(cost)
+
     for raw in path.read_text(encoding="utf-8").splitlines():
         if not raw.strip():
             continue
@@ -95,6 +110,12 @@ def parse_file(path: Path) -> dict:
             continue
         if kind == "thinking_level_change":
             meta["thinkingLevel"] = obj.get("thinkingLevel") or ""
+            continue
+        if kind == "usage":
+            add_usage(obj.get("usage"))
+            continue
+        if kind in ("compaction", "branch_summary"):
+            add_usage(obj.get("usage"))
             continue
         if kind != "message":
             continue
@@ -123,6 +144,8 @@ def parse_file(path: Path) -> dict:
                 )
             continue
         if role == "assistant":
+            add_usage(msg.get("usage"))
+            usage["requests"] += 1
             content = msg.get("content") or []
             texts: list[str] = []
             thinkings: list[str] = []
@@ -176,6 +199,7 @@ def parse_file(path: Path) -> dict:
                 )
             continue
         if role == "toolResult":
+            add_usage(msg.get("usage"))
             out = content_text(msg.get("content"))
             tool_call_id = msg.get("toolCallId")
             is_error = bool(msg.get("isError"))
@@ -198,6 +222,14 @@ def parse_file(path: Path) -> dict:
             )
     meta["title"] = meta.get("firstUser") or meta["file"]
     meta["count"] = len(items)
+    prompt_tokens = usage["input"] + usage["cacheRead"] + usage["cacheWrite"]
+    if prompt_tokens or usage["output"] or usage["requests"]:
+        meta["usage"] = {
+            **usage,
+            "cost": round(usage["cost"], 6),
+            "total": usage["input"] + usage["output"] + usage["cacheRead"] + usage["cacheWrite"],
+            "cht": (usage["cacheRead"] / prompt_tokens * 100) if prompt_tokens else None,
+        }
     return {"meta": meta, "items": items}
 
 
@@ -215,7 +247,15 @@ def main() -> None:
         kinds = {}
         for it in s["items"]:
             kinds[it["kind"]] = kinds.get(it["kind"], 0) + 1
-        print(f"  {m['title']!r}  {m['model']}  items={m['count']}  {kinds}")
+        u = m.get("usage")
+        cht = "?" if u and u["cht"] is None else (round(u["cht"], 1) if u else None)
+        tokens = (
+            f"in={u['input']} cacheR={u['cacheRead']} cacheW={u['cacheWrite']} out={u['output']} "
+            f"total={u['total']} cht={cht}%"
+            if u
+            else "usage=none"
+        )
+        print(f"  {m['title']!r}  {m['model']}  items={m['count']}  {kinds}  {tokens}")
 
 
 if __name__ == "__main__":

@@ -39,3 +39,4 @@
 - 助手气泡 wrap-content，无 320dp 上限
 - Copy 只是占位，不写剪贴板
 - 助手气泡时间戳旁 mock TTFT / tok/s（首轮有 TTFT，工具后续写只有 tok/s）；左侧可关「显示 TTFT / tok/s」，可关「插入流式气泡样例」
+- 输入框上方状态栏第二行 mock 会话累计 token：`↑input · R cacheRead · W cacheWrite · ↓output · CHT%`（不显示 total），数值由 `parse_sessions.py` 从 jsonl 的 `message.usage` 累加（和 pi TUI 的 cache-hit 扩展同口径）；左侧可关「显示会话累计 token 行」

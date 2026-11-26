@@ -122,6 +122,11 @@
       padding: 8px 10px 12px;
     }
     .status-strip { font-size: 11px; color: var(--on-variant); padding: 0 6px 6px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .token-strip {
+      font-size: 11px; color: var(--on-variant); padding: 0 6px 6px;
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+      font-variant-numeric: tabular-nums; opacity: .9;
+    }
     .composer-row { display: flex; gap: 6px; align-items: flex-end; }
     .fake-input {
       flex: 1;
@@ -438,6 +443,7 @@
       <label><input type="checkbox" id="demoLinks" checked> 插入链接样例</label>
       <label><input type="checkbox" id="demoCodeWrap" checked> 插入代码块换行样例</label>
       <label><input type="checkbox" id="showSpeed" checked> 显示 TTFT / tok/s</label>
+      <label><input type="checkbox" id="showTokens" checked> 显示会话累计 token 行</label>
       <label><input type="checkbox" id="demoLive" checked> 插入流式气泡样例</label>
       <label><input type="checkbox" id="demoOccupied"> 显示 occupied 底部栏（接管按钮演示）</label>
       <label><input type="checkbox" id="demoHandback"> 显示会话行交还按钮演示</label>
@@ -459,6 +465,7 @@
         <li>Markdown 围栏代码块：头部语言名 + 块级 ⧉ 复制（不是整气泡那颗）。显示按宽度折行（无空格长 token 也可断），不再横滑；复制 / 选中仍是源文本，不因折行多出换行符。</li>
         <li>read 到 <code>.md</code> 时，展开按 Markdown 渲染。</li>
         <li>助手气泡时间戳旁挂本条速度：<code>TTFT 1.2s · 38 tok/s</code>。首轮有 TTFT，工具后续写只留 tok/s。流式 tok/s 带 <code>~</code> 表示估算；等待首 token 时气泡只有光标、不写速度。</li>
+        <li>输入框上方状态栏第二行是<b>会话累计</b> token：<code>↑input · R cacheRead · W cacheWrite · ↓output · CHT%</code>（数值来自 <code>get_session_stats</code>；cacheWrite 为 0 时不显示，费用为 0 时不显示，CHT = cacheRead / (input+cacheRead+cacheWrite)）。左侧可关。</li>
         <li>LaTeX <b>不渲染</b>：识别出 <code>$$…$$</code> / <code>\[…\]</code> 公式块，显示原始 LaTeX + 复制按钮（复制含定界符，可直接粘到别处）；行内 <code>$…$</code> 只加等宽底色，保留原文。</li>
         <li>接管演示（勾选左侧 <code>demoOccupied</code>）：occupied 底部栏出现「接管」按钮 → 确认框（TUI 会在当前工具执行完后退出，然后由 App 接管）→ 确认后底部栏变 spinner + 「已排队，等待 TUI 本轮结束…」。TUI 空闲时直接退出的文案是「正在退出…」。点击排队状态可重置演示。</li>
         <li>交还演示（勾选左侧 <code>demoHandback</code>）：topbar 下出现会话行，右侧「交还」按钮 → 确认框（在主机的 screen 里启动 TUI）→ 确认后变 spinner + 「正在启动 TUI…」→ 演示用 2s 后显示成功提示条（真机上不断开，底部自动变 steer）。点击成功条重置演示。</li>
@@ -482,6 +489,7 @@
       <div class="list" id="list"></div>
       <div class="composer">
         <div class="status-strip" id="strip"></div>
+        <div class="token-strip" id="tokenStrip"></div>
         <div class="composer-row">
           <div class="fake-input" id="fakeInput">Message pi</div>
           <div class="send" id="sendBtn">➤</div>
@@ -954,6 +962,31 @@
       return "";
     }
 
+    // Session-cumulative token line, same numbers as the TUI cache-hit extension:
+    // ↑input R(cacheRead) W(cacheWrite) ↓output 总total CHT%
+    const DEMO_USAGE = { input: 7415, cacheRead: 34048, cacheWrite: 512, output: 3129, total: 45104, cost: 0.42, cht: 81.0 };
+
+    function fmtTokens(n) {
+      n = Number(n) || 0;
+      if (n < 1000) return `${n}`;
+      if (n < 10000) return `${(n / 1000).toFixed(1)}k`;
+      if (n < 1000000) return `${Math.round(n / 1000)}k`;
+      return `${(n / 1000000).toFixed(1)}M`;
+    }
+
+    function renderTokenStrip(s) {
+      const el = document.getElementById("tokenStrip");
+      if (!document.getElementById("showTokens").checked) { el.style.display = "none"; return; }
+      el.style.display = "";
+      const u = (s.meta && s.meta.usage) || DEMO_USAGE;
+      const parts = [`↑${fmtTokens(u.input)}`, `R${fmtTokens(u.cacheRead)}`];
+      if (u.cacheWrite) parts.push(`W${fmtTokens(u.cacheWrite)}`);
+      parts.push(`↓${fmtTokens(u.output)}`);
+      if (u.cht !== null && u.cht !== undefined) parts.push(`CHT${u.cht.toFixed(1)}%`);
+      if (u.cost > 0) parts.push(`$${u.cost.toFixed(3)}`);
+      el.textContent = parts.join(" · ");
+    }
+
     function render({ pinBottom = true } = {}) {
       const sessions = window.SESSIONS || [];
       const s = sessions[active];
@@ -963,6 +996,7 @@
       document.getElementById("barSub").textContent = s.meta.model || "";
       document.getElementById("strip").textContent =
         [s.meta.model, s.meta.thinkingLevel && ("think " + s.meta.thinkingLevel), s.meta.cwd].filter(Boolean).join(" · ");
+      renderTokenStrip(s);
       const extras = [
         ...(document.getElementById("demoTools").checked ? DEMO_TOOLS : []),
         ...(document.getElementById("demoMath").checked ? DEMO_MATH : []),
@@ -1286,6 +1320,7 @@ RMSNorm(x)
     document.getElementById("demoLinks").addEventListener("change", render);
     document.getElementById("demoCodeWrap").addEventListener("change", render);
     document.getElementById("showSpeed").addEventListener("change", render);
+    document.getElementById("showTokens").addEventListener("change", render);
     document.getElementById("demoLive").addEventListener("change", render);
     document.getElementById("demoOccupied").addEventListener("change", () => { occupiedDemo = "idle"; render(); });
     document.getElementById("demoHandback").addEventListener("change", () => { handbackDemo = "idle"; render(); });

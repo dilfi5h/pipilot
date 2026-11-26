@@ -146,6 +146,20 @@ using `usage.output` when the provider reports it, otherwise `chars / 4` with a
 `~` prefix while streaming. History loaded via `get_entries` has no timing and
 shows no footnote. The numbers hang on the assistant bubble, not the status strip.
 
+Session token totals are a separate, cumulative number and live on a second
+status-strip line above the composer (mirroring the pi TUI cache-hit footer
+extension): `↑input · R cacheRead · W cacheWrite · ↓output · CHT%`, where
+`CHT = cacheRead / (input + cacheRead + cacheWrite)`. Total is deliberately not
+shown (the four raw values are the point; `tokens.total` is just their sum). The
+data is the `tokens` object from the existing `get_session_stats` call
+(server-side totals over assistant messages, tool usage, and
+compaction/branch summaries), not a client-side sum: history loaded via
+`get_entries` does not retain per-message usage, and the server already counts
+messages produced in the TUI. The line is
+refreshed on `agent_settled`, not per token; `cacheWrite` and `cost` are hidden
+when zero (subscription providers report no cost). Per-reply TTFT / tok/s stay
+on the bubble so the two are never confused.
+
 ### 3.4 UI item reduction (merge strategy)
 
 `StreamReducer` emits "delta ops"; `PiViewModel.mergeItems` folds them into the

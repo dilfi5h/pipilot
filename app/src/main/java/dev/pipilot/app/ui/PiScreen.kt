@@ -1305,7 +1305,8 @@ private fun InputBar(viewModel: PiViewModel, ui: UiState) {
     val canSend = text.isNotBlank() || pendingImagePayloads.isNotEmpty()
     Surface(tonalElevation = 3.dp) {
         Column(Modifier.fillMaxWidth().imePadding()) {
-            // Status strip: model · thinking · tokens/context; fixed single line above the composer, never covers it
+            // Status strip: model · thinking · context% (line 1) and cumulative tokens (line 2);
+            // fixed above the composer, never covers it
             StatusStrip(ui)
             if (pendingImagePayloads.isNotEmpty()) {
                 LazyRow(
@@ -1424,26 +1425,38 @@ private fun StatusStrip(ui: UiState) {
         append(model?.displayName ?: "No model selected")
         ui.state?.thinkingLevel?.let { append(" · $it") }
     }
-    // Left: model/thinking may ellipsize; right: tokens/context stay visible so a long number does not push context off-screen
-    Row(
-        modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Text(
-            text = left,
-            style = MaterialTheme.typography.labelSmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-            maxLines = 1,
-            overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
-            modifier = Modifier.weight(1f),
-        )
-        ui.statsText?.let { stats ->
+    val stats = ui.stats
+    // Line 1: model/thinking (may ellipsize) + context %; line 2: session-cumulative tokens.
+    // Both are fixed lines above the composer and never cover it.
+    Column(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp)) {
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
             Text(
-                text = stats,
+                text = left,
                 style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 maxLines = 1,
-                modifier = Modifier.padding(start = 8.dp),
+                overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f),
+            )
+            stats?.contextPercent?.let { pct ->
+                Text(
+                    text = "context $pct%",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                    modifier = Modifier.padding(start = 8.dp),
+                )
+            }
+        }
+        val usage = stats?.usage
+        if (usage != null && !usage.isEmpty) {
+            Text(
+                text = formatUsageLine(usage),
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1,
+                overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+                modifier = Modifier.fillMaxWidth().padding(top = 1.dp),
             )
         }
     }
